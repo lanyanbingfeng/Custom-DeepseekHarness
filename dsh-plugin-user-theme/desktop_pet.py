@@ -24,6 +24,7 @@ import http.client
 import io
 import json
 import math
+import os
 import queue
 import socket
 import struct
@@ -36,8 +37,23 @@ try:
     import ctypes
 
     _user32 = ctypes.windll.user32
+    _kernel32 = ctypes.windll.kernel32
+    # 64 位下 HWND 是 64 位指针，必须显式声明参数类型，否则 ctypes 默认按
+    # 32 位 c_int 传递，SetWindowPos 会拿到被截断的句柄而静默置顶失败。
+    _user32.SetWindowPos.argtypes = (
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+    )
+    _user32.SetWindowPos.restype = ctypes.c_int
+    _kernel32.OpenProcess.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.c_uint)
+    _kernel32.OpenProcess.restype = ctypes.c_void_p
+    _kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    _kernel32.WaitForSingleObject.restype = ctypes.c_uint
+    _kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    _kernel32.CloseHandle.restype = ctypes.c_int
 except (ImportError, AttributeError, OSError):  # 非 Windows 平台
     _user32 = None
+    _kernel32 = None
 
 try:
     import winsound
@@ -106,6 +122,55 @@ def play_dingdong():
         pass
 
 
+def make_parent_alive_checker():
+    """返回一个无参函数，判断托管本进程的父进程（Node/DSH）是否仍存活。
+
+    Node 端用 detached 拉起本进程；DSH 异常退出（崩溃/被强杀）时不会执行
+    dispose，本进程会残留成僵尸。这里通过父进程句柄轮询，父进程一旦退出就
+    返回 False，由调用方自行退出。非 Windows 或探测不可用返回 None。
+    """
+    if _kernel32 is None:
+        return None
+    try:
+        ppid = os.getppid()
+    except Exception:
+        return None
+    if ppid <= 0:
+        return None
+    SYNCHRONIZE = 0x00100000
+    WAIT_OBJECT_0 = 0x00000000
+
+    def alive():
+        try:
+            handle = _kernel32.OpenProcess(SYNCHRONIZE, 0, ppid)
+            if not handle:
+                return False  # 无法打开父进程句柄，视为已退出
+            exited = _kernel32.WaitForSingleObject(handle, 0) == WAIT_OBJECT_0
+            _kernel32.CloseHandle(handle)
+            return not exited
+        except Exception:
+            return True  # 探测失败时不误杀，保持现状
+
+    return alive
+
+
+def start_parent_watchdog(alive):
+    """父进程退出检测线程：检测到父进程消失则整进程退出，避免僵尸进程。"""
+    if alive is None:
+        return
+
+    def loop():
+        while True:
+            time.sleep(5)
+            try:
+                if not alive():
+                    os._exit(0)
+            except Exception:
+                pass
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def sse_worker(url, events):
     """SSE 订阅线程：断线自动重连（1s → 2s → 5s → … 上限 30s）。"""
     parsed = urlparse(url)
@@ -167,7 +232,10 @@ class DesktopPet:
             self.root.attributes("-toolwindow", True)  # 不占任务栏图标
         except tk.TclError:
             pass
-        self.root.attributes("-transparentcolor", CHROMA)
+        try:
+            self.root.attributes("-transparentcolor", CHROMA)  # Windows 专属色键透明
+        except tk.TclError:
+            pass
         self.root.configure(bg=CHROMA)
 
         self.frames = self._load_frames(assets_dir)
@@ -232,8 +300,6 @@ class DesktopPet:
         预合成到色键色上，彻底规避 tkinter 直接显示 PNG 的白底问题。
         无 Pillow：退回 tk.PhotoImage 原图直读（可能有白底，仅兜底）。
         """
-        import os
-
         frames = {}
         if HAS_PIL:
             chroma_rgb = (1, 1, 1)  # 与 CHROMA "#010101" 一致
@@ -266,6 +332,12 @@ class DesktopPet:
 
     def show(self):
         if self._visible:
+            # 已在显示：重复的完成事件重新弹跳 + 响铃，避免漏掉后续任务
+            if self._hop_after_id is not None:
+                self.root.after_cancel(self._hop_after_id)
+                self._hop_after_id = None
+            play_dingdong()
+            self._hop(0)
             return
         self._visible = True
         screen_w = self.root.winfo_screenwidth()
@@ -280,8 +352,8 @@ class DesktopPet:
             width=PET_SIZE, height=PET_SIZE,
         )
         self.root.deiconify()
+        self.root.update_idletasks()  # 确保窗口已映射，winfo_id() 拿到有效句柄
         self.root.lift()
-        self.root.focus_force()
         force_topmost(self.root)
         play_dingdong()
         self._hop(0)
@@ -360,6 +432,9 @@ def main():
     parser.add_argument("--sse", required=True, help="SSE 事件流 URL")
     parser.add_argument("--assets", required=True, help="桌宠素材目录（含 idle.png 等）")
     args = parser.parse_args()
+
+    # 父进程退出检测：DSH 异常退出时自动退出，避免残留僵尸进程
+    start_parent_watchdog(make_parent_alive_checker())
 
     events = queue.Queue()
     threading.Thread(target=sse_worker, args=(args.sse, events), daemon=True).start()

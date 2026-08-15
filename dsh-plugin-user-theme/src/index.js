@@ -94,6 +94,8 @@ function setupNotify(ctx) {
   const runningSince = new Map(); // agentId -> running 起始时间戳
   const sseClients = new Set(); // ServerResponse 集合
   const visibleTabs = new Map(); // clientId -> { visible, at }
+  const sseByClient = new Map(); // clientId -> ServerResponse（断开时据此清理可见性）
+  let lastDone = null; // 最近一次完成事件，供 SSE 断线重连时补发
   let petProc = null;
 
   const pageVisible = () => {
@@ -139,7 +141,8 @@ function setupNotify(ctx) {
       if (!config.notifyEnabled) return;
       const durationMs = Date.now() - started;
       if (durationMs >= config.minDurationSec * 1000) {
-        broadcast({ type: "done", durationMs, pageVisible: pageVisible(), at: Date.now() });
+        lastDone = { type: "done", durationMs, pageVisible: pageVisible(), at: Date.now() };
+        broadcast(lastDone);
       }
     } catch {
       /* 单个事件异常不影响宿主 */
@@ -157,14 +160,37 @@ function setupNotify(ctx) {
       kind: "exact",
       path: `${PET_ROUTE_PREFIX}/pet-events`,
       handler: (req, res) => {
+        let clientId = null;
+        try {
+          const q = new URL(req.url, "http://localhost").searchParams.get("clientId");
+          if (q) clientId = q;
+        } catch {
+          /* clientId 仅用于断开时清理可见性，缺失不影响事件流 */
+        }
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
         });
         res.write("retry: 3000\n\n");
+        // 断线重连补发：把最近一次完成事件（60s 内）推给刚连上的客户端，
+        // 避免桌宠进程启动 / 断线期间漏掉任务完成提醒。
+        if (lastDone && Date.now() - lastDone.at < 60_000) {
+          res.write(`data: ${JSON.stringify(lastDone)}\n\n`);
+        }
         sseClients.add(res);
-        req.on("close", () => sseClients.delete(res));
+        if (clientId) sseByClient.set(clientId, res);
+        const cleanup = () => {
+          sseClients.delete(res);
+          if (clientId) {
+            sseByClient.delete(clientId);
+            // 浏览器被强杀/关闭时 SSE 立即断开，据此同步清除其可见性，
+            // 避免残留的 visible 记录在 TTL 内误判「用户在看」而漏提醒。
+            if (visibleTabs.delete(clientId)) checkVisibilityTransition();
+          }
+        };
+        req.on("close", cleanup);
+        res.on("close", cleanup);
       },
     })
   );
@@ -260,8 +286,11 @@ function setupNotify(ctx) {
         petProc = null;
         console.warn(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
       });
-      petProc.on("exit", () => {
+      petProc.on("exit", (code, signal) => {
         petProc = null;
+        if (code !== 0) {
+          console.warn(`[user-theme] 桌面宠物进程异常退出（code=${code} signal=${signal}），浏览器内提醒不受影响`);
+        }
       });
       petProc.unref();
     } catch (err) {

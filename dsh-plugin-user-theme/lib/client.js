@@ -437,7 +437,7 @@ window.__ModuleLoader__.load({
 			}
 
 			try {
-				var es = new EventSource(PET_API + "/pet-events");
+				var es = new EventSource(PET_API + "/pet-events?clientId=" + encodeURIComponent(clientId));
 				es.onmessage = function (ev) {
 					var payload;
 					try { payload = JSON.parse(ev.data); } catch (e) { return; }
@@ -489,6 +489,21 @@ window.__ModuleLoader__.load({
 			React.useEffect(function () {
 				applySettings(settings);
 				// eslint-disable-next-line
+			}, []);
+
+			// 多页签同步：其他标签改动 localStorage 时，同步本标签的 UI 与行为
+			React.useEffect(function () {
+				function onStorage(e) {
+					if (e.key !== STORAGE_KEY) return;
+					try {
+						var fresh = loadSettings();
+						setSettings(fresh);
+						applySettings(fresh);
+						window.dispatchEvent(new Event(SETTINGS_EVENT));
+					} catch (err) {}
+				}
+				window.addEventListener("storage", onStorage);
+				return function () { window.removeEventListener("storage", onStorage); };
 			}, []);
 
 			function update(patch) {
