@@ -115,6 +115,16 @@ function setupNotify(ctx) {
     }
   };
 
+  // 可见性聚合翻转时广播，供桌面宠物在用户回到页面时自动收起
+  let lastPageVisible = null;
+  const checkVisibilityTransition = () => {
+    const v = pageVisible();
+    if (v !== lastPageVisible) {
+      lastPageVisible = v;
+      broadcast({ type: "visibility", pageVisible: v, at: Date.now() });
+    }
+  };
+
   // --- agent/status 耗时统计（子代理会话跳过） ---
   ctx.on("agent/status", ({ agent, status }) => {
     try {
@@ -167,6 +177,7 @@ function setupNotify(ctx) {
         const body = await readJsonBody(req);
         if (typeof body.clientId === "string" && body.clientId) {
           visibleTabs.set(body.clientId, { visible: body.visible === true, at: Date.now() });
+          checkVisibilityTransition();
         }
         res.writeHead(204);
         res.end();
@@ -228,6 +239,7 @@ function setupNotify(ctx) {
     for (const [id, t] of visibleTabs) {
       if (now - t.at >= VISIBILITY_TTL_MS) visibleTabs.delete(id);
     }
+    checkVisibilityTransition(); // 过期剔除也可能导致聚合翻转
   }, SSE_HEARTBEAT_MS);
 
   // --- Python 桌面宠物进程托管 ---

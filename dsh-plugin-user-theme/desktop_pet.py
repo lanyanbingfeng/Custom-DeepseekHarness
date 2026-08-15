@@ -10,9 +10,10 @@
   - 平时完全隐藏（无窗口、无托盘，CPU/内存占用趋零）；
   - 通过 SSE 长连接订阅 Node 端的任务完成事件（自动重连，指数退避）；
   - 收到 done 事件且 pageVisible 为 false（没有任何 DSH 页面在被查看，
-    包括浏览器已关闭的场景）时，在屏幕右下角弹出置顶透明窗口：
+    包括浏览器已关闭的场景）时，在屏幕右下角弹出强制置顶的透明窗口：
     桌宠弹跳三下 + 圆角气泡「主人，你的任务完成了哦」+ 叮咚提示音；
-  - 15 秒无操作或点击窗口后自动收起。
+  - 弹窗常驻最前（每 2s 用 Win32 SetWindowPos 重新断言置顶），
+    当用户回到 Harness 页面（服务端广播 visibility 事件）或点击弹窗时收起。
 
 依赖：纯标准库即可运行；若装有 Pillow，则桌宠帧会高质量缩放并
 预合成到透明色键（消除 tkinter 直接显示 PNG 时的白底问题）。
@@ -32,6 +33,13 @@ import tkinter as tk
 from urllib.parse import urlparse
 
 try:
+    import ctypes
+
+    _user32 = ctypes.windll.user32
+except (ImportError, AttributeError, OSError):  # 非 Windows 平台
+    _user32 = None
+
+try:
     import winsound
 except ImportError:  # 非 Windows 平台静默降级为无声
     winsound = None
@@ -44,11 +52,13 @@ except ImportError:
     HAS_PIL = False
 
 BUBBLE_TEXT = "主人，你的任务完成了哦"
-POPUP_SECONDS = 15
+# 弹窗不再自动消失：只有用户点击弹窗（气泡或桌宠）才收起
 WINDOW_W = 260
 WINDOW_H = 220
 PET_SIZE = 128  # 桌宠显示高度（px）
 CHROMA = "#010101"  # 透明色键：此颜色区域完全透明
+# 距底边距加大到 80px，确保避开 Windows 任务栏（默认 40px）及可能的系统 UI
+MARGIN_BOTTOM = 80
 
 # 气泡样式（与 DSH 主题一致的深蓝点缀）
 BUBBLE_FILL = "#ffffff"
@@ -136,11 +146,27 @@ def sse_worker(url, events):
                     pass
 
 
+def force_topmost(root):
+    """Win32 SetWindowPos 强制置顶（tk -topmost 会被其他置顶窗口/焦点抢占压下）。"""
+    if _user32 is None:
+        return
+    try:
+        hwnd = root.winfo_id()
+        # HWND_TOPMOST=-1, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW=0x43
+        _user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
+    except Exception:
+        pass
+
+
 class DesktopPet:
     def __init__(self, assets_dir):
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
+        try:
+            self.root.attributes("-toolwindow", True)  # 不占任务栏图标
+        except tk.TclError:
+            pass
         self.root.attributes("-transparentcolor", CHROMA)
         self.root.configure(bg=CHROMA)
 
@@ -168,7 +194,7 @@ class DesktopPet:
 
         self._pet_base_y = 0  # 桌宠静止时的 y 坐标（弹跳动画基准）
         self._hop_after_id = None
-        self._hide_after_id = None
+        self._topmost_after_id = None
         self._visible = False
         self.root.withdraw()
 
@@ -245,7 +271,7 @@ class DesktopPet:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         x = screen_w - WINDOW_W - 24
-        y = screen_h - WINDOW_H - 64
+        y = screen_h - WINDOW_H - MARGIN_BOTTOM
         self.root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
         self.bubble.place(x=0, y=4, width=WINDOW_W - 24, height=64)
         self._pet_base_y = WINDOW_H - PET_SIZE - 10
@@ -256,26 +282,31 @@ class DesktopPet:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        force_topmost(self.root)
         play_dingdong()
         self._hop(0)
-        self._schedule_hide()
+        self._assert_topmost()  # 显示期间周期性重新断言置顶
+        # 收起时机：用户回到 Harness 页面（服务端广播）或手动点击弹窗
 
     def hide(self):
         if not self._visible:
             return
         self._visible = False
-        if self._hide_after_id is not None:
-            self.root.after_cancel(self._hide_after_id)
-            self._hide_after_id = None
         if self._hop_after_id is not None:
             self.root.after_cancel(self._hop_after_id)
             self._hop_after_id = None
+        if self._topmost_after_id is not None:
+            self.root.after_cancel(self._topmost_after_id)
+            self._topmost_after_id = None
         self.root.withdraw()
 
-    def _schedule_hide(self):
-        if self._hide_after_id is not None:
-            self.root.after_cancel(self._hide_after_id)
-        self._hide_after_id = self.root.after(POPUP_SECONDS * 1000, self.hide)
+    def _assert_topmost(self):
+        """置顶断言循环：防止其他窗口抢走最前位置。"""
+        if not self._visible:
+            return
+        self.root.lift()
+        force_topmost(self.root)
+        self._topmost_after_id = self.root.after(2000, self._assert_topmost)
 
     def _hop(self, hop_index):
         """弹跳三下：每跳 12 步正弦起落，上升段用 jump 帧。"""
@@ -311,12 +342,14 @@ class DesktopPet:
         try:
             while True:
                 payload = events.get_nowait()
-                if (
-                    isinstance(payload, dict)
-                    and payload.get("type") == "done"
-                    and payload.get("pageVisible") is False
-                ):
+                if not isinstance(payload, dict):
+                    continue
+                ptype = payload.get("type")
+                if ptype == "done" and payload.get("pageVisible") is False:
                     self.show()
+                elif ptype == "visibility" and payload.get("pageVisible") is True:
+                    # 用户回到 Harness 页面，自动收起
+                    self.hide()
         except queue.Empty:
             pass
         self.root.after(100, lambda: self.poll_events(events))
