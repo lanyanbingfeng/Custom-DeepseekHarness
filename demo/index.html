@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek Harness</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='24'>🌿</text></svg>" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- 背景层：图片 + 蒙版（保证文字可读） -->
+  <div class="bg-layer">
+    <div class="bg-image"></div>
+    <div class="bg-overlay"></div>
+  </div>
+
+  <div class="app">
+    <!-- 左侧边栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M16 3C9 3 4 9 4 16c0 5 3 9 7 11l1-2c-3-1.5-5-4.5-5-8 0-5 4-9 9-9s9 4 9 9c0 3.5-2 6.5-5 8l1 2c4-2 7-6 7-11 0-7-5-13-12-13z" fill="url(#g1)"/>
+            <path d="M16 11c-3 0-5 2.5-5 5s2 5 5 5 5-2.5 5-5-2-5-5-5z" fill="url(#g2)"/>
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="32" y2="32">
+                <stop offset="0" stop-color="#5fa56e"/>
+                <stop offset="1" stop-color="#3d7c4d"/>
+              </linearGradient>
+              <linearGradient id="g2" x1="0" y1="0" x2="32" y2="32">
+                <stop offset="0" stop-color="#f5c5c5"/>
+                <stop offset="1" stop-color="#e8a4a4"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">deepseek <span class="brand-badge">HARNESS</span></div>
+        </div>
+      </div>
+
+      <button class="new-chat-btn">
+        <span class="icon">＋</span>
+        <span>新会话</span>
+      </button>
+
+      <div class="nav-section">
+        <div class="nav-label">工作区</div>
+        <a class="nav-item active">
+          <span class="icon">📁</span><span>Desktop</span>
+        </a>
+      </div>
+
+      <div class="nav-section">
+        <a class="session-item active">
+          <div class="session-title">查询游戏名称</div>
+          <div class="session-meta">2 分钟前</div>
+        </a>
+        <a class="session-item">
+          <div class="session-title">配置 RAG 知识库与 Harness</div>
+          <div class="session-meta">2 小时前</div>
+        </a>
+        <a class="session-item">
+          <div class="session-title">创建测试文件夹与桌面</div>
+          <div class="session-meta">1 小时前</div>
+        </a>
+        <a class="session-item">
+          <div class="session-title">配置本地 qwen 模型与 harne…</div>
+          <div class="session-meta">5 小时前</div>
+        </a>
+        <a class="session-item">
+          <div class="session-title">创建 DeepseekHarness 桌面</div>
+          <div class="session-meta">2 小时前</div>
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="settings-btn" title="设置">
+          <span class="icon">⚙</span>
+          <span>设置</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main class="main">
+      <!-- 顶部栏 -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="breadcrumb">
+            <span class="crumb">查询游戏名称</span>
+            <span class="sep">›</span>
+            <span class="crumb current">标准模式</span>
+          </div>
+          <nav class="view-tabs">
+            <a class="tab active">对话</a>
+            <a class="tab">轨迹</a>
+          </nav>
+        </div>
+        <div class="topbar-right">
+          <button class="session-log-btn"><span>Session log</span> <span>↓</span></button>
+        </div>
+      </header>
+
+      <!-- 聊天区 -->
+      <section class="chat">
+        <div class="chat-inner">
+          <div class="messages" id="messages">
+            <!-- 用户消息 -->
+            <div class="msg user">
+              <div class="msg-body">
+                <div class="msg-text">
+                  <p>查询一款基于修仙题材的开放游戏名称。</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- 助手消息：tool-call 折叠行 -->
+            <div class="msg assistant">
+              <div class="msg-body">
+                <div class="tool-row" data-open="0">
+                  <span class="tool-icon">✓</span>
+                  <span class="tool-name">Tool call</span>
+                  <span class="tool-arg">mcp__lightrag__lightrag_list_documents</span>
+                  <span class="tool-params">{"page":1, "page_size":20}</span>
+                  <span class="tool-chevron">▸</span>
+                </div>
+
+                <div class="tool-row" data-open="0">
+                  <span class="tool-icon">✓</span>
+                  <span class="tool-name">Tool call</span>
+                  <span class="tool-arg">mcp__lightrag__lightrag_search_knowledge</span>
+                  <span class="tool-params">修仙</span>
+                  <span class="tool-chevron">▸</span>
+                </div>
+
+                <!-- Think 折叠行 -->
+                <div class="think-row" data-open="0">
+                  <span class="think-icon">💭</span>
+                  <span class="think-label">Think</span>
+                  <span class="think-summary">Found it. The knowledge base document "开发总纲.md" (development plan) has the title:</span>
+                  <span class="think-chevron">▸</span>
+                </div>
+
+                <div class="msg-text">
+                  <p style="font-weight:700">查询到了！ 知识库中你最近开发的游戏叫：</p>
+                  <h3 style="margin:12px 0 8px">《我的逆天修仙系统》</h3>
+                  <p>这是知识库中的《开发总纲.md》开头的项目名称。实体标签里有「我的逆天修仙系统」确认，总结一下知识库里记载的该项目信息：</p>
+                  <ul class="bullet-list">
+                    <li><b>游戏定位</b>：废土主角 + 系统任务流 + 增量挂机 + 肉鸽闯关 四合一修仙挂机的游戏</li>
+                    <li><b>引擎/平台</b>：Godot 4.7 (GDScript 4.x) · 目标全平台 (PC 桌面端 + 移动端)</li>
+                    <li><b>美术风格</b>：2D 像素，32×32 瓦片体系，图片生成模型制作美术（Assetts.md 中有像素美术规范）</li>
+                    <li><b>核心系统（已有代码入库）</b>
+                      <ul>
+                        <li>灵根养成（五行灵根 → 天灵根，挂机产出值倍率引擎）</li>
+                        <li>挂机产出·高线收益预警（TimeManager / GameManager）</li>
+                        <li>境界体系（炼气等修炼境界，配置数据驱动 realms.json）</li>
+                        <li>丹药谱谱 Build（三选一遗物）、任务系统</li>
+                        <li>2D 印控制主角角色 + 主角装置（程序化小镇、建造巡检、交互）</li>
+                        <li>本地存档存档（user://save.json + 备份）</li>
+                      </ul>
+                    </li>
+                    <li><b>后续规划</b>：境界突破与渡劫、剧情与凡人系统、云存档（CloudBase）等里程碑</li>
+                  </ul>
+                  <p>需要我进一步查各个具体模块（比如灵根资质值、境界配置或存档结构）吗？</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入区：DSH 真实结构 -->
+        <div class="composer">
+          <div class="composer-inner">
+            <button class="tool-btn plus" title="命令">＋</button>
+            <textarea
+              class="composer-input"
+              id="composer"
+              rows="1"
+              placeholder="给智能体发消息"
+            ></textarea>
+            <div class="composer-right">
+              <button class="access-select"><span class="access-icon">⊕</span><span>Full access</span><span class="caret">▾</span></button>
+              <div class="model-select">
+                <span class="model-name">DeepSeek-V4 Flash</span>
+                <span class="model-effort">High</span>
+                <span class="caret">▾</span>
+              </div>
+              <button class="send-btn" id="sendBtn" title="发送">
+                <span class="send-icon">↑</span>
+              </button>
+            </div>
+          </div>
+          <!-- 轮次统计行（DSH 真实底部） -->
+          <div class="stats-row">
+            <span>1 轮 · 4 步</span>
+            <span class="dot-sep">·</span>
+            <span>LLM 16.4s · 工具调用 28s</span>
+            <span class="dot-sep">·</span>
+            <span>首 token 0.3s · 134 tok/s</span>
+            <span class="dot-sep">·</span>
+            <span>缓存命中 67%</span>
+            <span class="dot-sep">·</span>
+            <span>输入 73.9K tok · 输出 1.8K tok</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 配色切换器（浮动按钮，不占主界面） -->
+  <div class="theme-picker" id="themePicker">
+    <button class="theme-toggle" id="themeToggle" title="切换配色">
+      <span>🎨</span>
+    </button>
+    <div class="theme-panel" id="themePanel">
+      <div class="theme-panel-title">配色</div>
+      <span class="swatch active" data-theme-name="default" style="background:#3b6ea8" title="深蓝"></span>
+      <span class="swatch" data-theme-name="violet" style="background:#a78bfa" title="紫罗兰"></span>
+      <span class="swatch" data-theme-name="emerald" style="background:#34d399" title="翡翠绿"></span>
+      <span class="swatch" data-theme-name="amber" style="background:#f59e0b" title="暖橙"></span>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

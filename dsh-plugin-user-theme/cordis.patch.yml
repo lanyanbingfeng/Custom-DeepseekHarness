@@ -1,0 +1,10 @@
+# dsh-plugin-user-theme 入口：单条 insert，把 src/index.js 作为 user-theme 插件挂载
+# 通过 webServer.tapIndex 注入自定义 <style>，实现：
+#   - 背景图（assets/bg.jpg）
+#   - 楷体字体
+#   - 深蓝主色 + 各层半透明磨砂
+#   - 设置面板/弹窗调实
+
+- insert:
+    - id: user-theme
+      name: ./src/index.js

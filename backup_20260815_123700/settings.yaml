@@ -1,0 +1,22 @@
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4-flash
+  reasoningEffort: high
+ui-theme:
+  preference: dark
+permission:
+  defaultPreset: danger-full-access
+llm-pi-ai:
+  providers:
+    qwen-local:
+      displayName: Qwen3 本地 (Ollama)
+      apiKeyEnv: OLLAMA_API_KEY
+      api: openai-completions
+      baseURL: http://localhost:11434/v1
+      models:
+        - id: qwen3:4b-instruct-2507-q4_K_M
+          name: Qwen3 4B Instruct
+          contextWindow: 16384
+          maxTokens: 1536

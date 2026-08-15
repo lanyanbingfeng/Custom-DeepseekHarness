@@ -1,0 +1,43 @@
+{
+  "name": "dsh-plugin-user-theme",
+  "version": "0.1.0",
+  "description": "DSH 定制主题插件：背景图 + 楷体 + 深蓝主色 + 半透明磨砂，内置原生「背景设置」标签（settings.section slot）。不修改任何 npm 包源码。",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "theme",
+    "user-theme",
+    "custom-ui"
+  ],
+  "author": {
+    "name": "ZhuanZ"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

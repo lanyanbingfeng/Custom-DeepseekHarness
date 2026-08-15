@@ -1,0 +1,17 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+
+# MCP bridge to the local LightRAG RAG knowledge base (http://127.0.0.1:9621).
+# The bridge script auto-loads LIGHTRAG_API_KEY from D:\lightrag\.env, so no
+# secret is stored here. Tool names appear as mcp__lightrag__*.
+- insert:
+    - id: mcp-lightrag
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: lightrag
+        transport: stdio
+        command: C:\Users\ZhuanZ\AppData\Local\Programs\Python\Python312\python.exe
+        args:
+          - C:\Users\ZhuanZ\.dsh\mcp\lightrag_mcp.py
+        toolCallTimeoutMs: 300000

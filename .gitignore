@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+
+# CodeBuddy 本地数据（plans / brain 等开发过程文件）
+.codebuddy/
+
+# 日志
+*.log
+
+# 诊断 / 临时文件
+_diag_*
+_ut_*
+_dsh_*
+
+# 系统文件
+.DS_Store
+Thumbs.db
