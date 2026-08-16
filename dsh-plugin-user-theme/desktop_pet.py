@@ -31,6 +31,7 @@ import struct
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from urllib.parse import urlparse
 
 try:
@@ -70,7 +71,6 @@ except ImportError:
 BUBBLE_TEXT_DONE = "主人，你的任务完成了哦"
 BUBBLE_TEXT_QUESTION = "主人，有一些问题需要你来定夺"
 # 弹窗不再自动消失：只有用户点击弹窗（气泡或桌宠）才收起
-WINDOW_W = 260
 WINDOW_H = 220
 PET_SIZE = 128  # 桌宠显示高度（px）
 CHROMA = "#010101"  # 透明色键：此颜色区域完全透明
@@ -81,7 +81,11 @@ MARGIN_BOTTOM = 80
 BUBBLE_FILL = "#ffffff"
 BUBBLE_OUTLINE = "#4a8fd6"
 BUBBLE_TEXT_COLOR = "#2b3a4a"
-BUBBLE_FONT = ("KaiTi", 13)
+BUBBLE_FONT_FAMILY = "KaiTi"
+BUBBLE_FONT_SIZE = 13
+BUBBLE_PAD_X = 22  # 气泡文字左右内边距（px）
+BUBBLE_H = 64  # 气泡高度（px）
+WINDOW_PAD_X = 24  # 窗口左右留白（px）
 
 PET_FRAMES = ["idle", "blink", "wave", "wink", "jump"]
 
@@ -241,11 +245,14 @@ class DesktopPet:
 
         self.frames = self._load_frames(assets_dir)
 
-        # 圆角气泡（Canvas 绘制：圆角矩形 + 小尾巴 + 文字）
+        # 字体对象（用于精确测量文字宽度，气泡自适应文案）
+        self._font = tkfont.Font(family=BUBBLE_FONT_FAMILY, size=BUBBLE_FONT_SIZE)
+
+        # 圆角气泡（Canvas 绘制：圆角矩形 + 小尾巴 + 文字），宽度随文案自适应
         self.bubble = tk.Canvas(
             self.root,
-            width=WINDOW_W - 24,
-            height=64,
+            width=200,  # 占位，show() 时会按文案重算
+            height=BUBBLE_H,
             bg=CHROMA,
             highlightthickness=0,
             bd=0,
@@ -267,12 +274,22 @@ class DesktopPet:
         self._visible = False
         self.root.withdraw()
 
+    def _bubble_width_for(self, text):
+        """根据文案像素宽度计算气泡宽度（含左右内边距），确保文字不被截断。"""
+        text_w = self._font.measure(text)
+        return text_w + BUBBLE_PAD_X * 2
+
+    def _window_width_for(self, bubble_w):
+        """窗口宽度 = 气泡宽度 + 左右留白，且不小于桌宠宽度。"""
+        return max(bubble_w + WINDOW_PAD_X, PET_SIZE + WINDOW_PAD_X)
+
     def _draw_bubble(self, text):
         """在 Canvas 上画圆角气泡：圆角矩形 + 指向桌宠的尾巴 + 文字。"""
         c = self.bubble
         c.delete("all")  # 支持重绘（文案切换时复用）
-        w = WINDOW_W - 24
-        x1, y1, x2, y2, r = 6, 4, w - 6, 46, 12
+        w = self._bubble_width_for(text)
+        c.config(width=w)
+        x1, y1, x2, y2, r = 6, 4, w - 6, BUBBLE_H - 18, 12
         # 圆角矩形（经典 smooth polygon 配方）
         points = [
             x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
@@ -292,7 +309,7 @@ class DesktopPet:
         c.create_rectangle(cx - 8, y2 - 3, cx + 8, y2 + 1, fill=BUBBLE_FILL, outline="")
         c.create_text(
             w // 2, (y1 + y2) // 2, text=text,
-            fill=BUBBLE_TEXT_COLOR, font=BUBBLE_FONT,
+            fill=BUBBLE_TEXT_COLOR, font=self._font,
         )
 
     def _load_frames(self, assets_dir):
@@ -333,28 +350,25 @@ class DesktopPet:
         return frames
 
     def show(self, text=BUBBLE_TEXT_DONE):
+        self._draw_bubble(text)
+        bubble_w = self._bubble_width_for(text)
+        window_w = self._window_width_for(bubble_w)
         if self._visible:
-            # 已在显示：更新文案并重新弹跳 + 响铃，避免漏掉后续事件
-            self._draw_bubble(text)
+            # 已在显示：更新文案尺寸并重新弹跳 + 响铃，避免漏掉后续事件
+            self._relayout(window_w, bubble_w)
             if self._hop_after_id is not None:
                 self.root.after_cancel(self._hop_after_id)
                 self._hop_after_id = None
             play_dingdong()
             self._hop(0)
             return
-        self._draw_bubble(text)
         self._visible = True
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        x = screen_w - WINDOW_W - 24
+        x = screen_w - window_w - WINDOW_PAD_X
         y = screen_h - WINDOW_H - MARGIN_BOTTOM
-        self.root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
-        self.bubble.place(x=0, y=4, width=WINDOW_W - 24, height=64)
-        self._pet_base_y = WINDOW_H - PET_SIZE - 10
-        self.pet.place(
-            x=(WINDOW_W - PET_SIZE) // 2, y=self._pet_base_y,
-            width=PET_SIZE, height=PET_SIZE,
-        )
+        self.root.geometry(f"{window_w}x{WINDOW_H}+{x}+{y}")
+        self._relayout(window_w, bubble_w)
         self.root.deiconify()
         self.root.update_idletasks()  # 确保窗口已映射，winfo_id() 拿到有效句柄
         self.root.lift()
@@ -363,6 +377,16 @@ class DesktopPet:
         self._hop(0)
         self._assert_topmost()  # 显示期间周期性重新断言置顶
         # 收起时机：用户回到 Harness 页面（服务端广播）或手动点击弹窗
+
+    def _relayout(self, window_w, bubble_w):
+        """按当前窗口/气泡宽度重新布局气泡与桌宠（均水平居中）。"""
+        bubble_x = (window_w - bubble_w) // 2
+        self.bubble.place(x=bubble_x, y=4, width=bubble_w, height=BUBBLE_H)
+        self._pet_base_y = WINDOW_H - PET_SIZE - 10
+        self.pet.place(
+            x=(window_w - PET_SIZE) // 2, y=self._pet_base_y,
+            width=PET_SIZE, height=PET_SIZE,
+        )
 
     def hide(self):
         if not self._visible:
