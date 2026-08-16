@@ -246,7 +246,8 @@ window.__ModuleLoader__.load({
 		}
 
 		/* ===== 任务完成提醒（SSE 消费方 + 可见性上报） ===== */
-		var NOTIFY_TEXT = "主人，你的任务完成了哦";
+		var NOTIFY_TEXT_DONE = "主人，你的任务完成了哦";
+		var NOTIFY_TEXT_QUESTION = "主人，有一些问题需要你来定夺";
 		var PET_API = "/plugins/dsh-plugin-user-theme";
 		// 本地设置 key → Node 端配置 key（这三项以服务端为权威，多页签/重启共享）
 		var SHARED_KEYS = {
@@ -302,6 +303,7 @@ window.__ModuleLoader__.load({
 		function setupTaskNotify() {
 			var audioCtx = null;
 			var pendingCelebration = false;
+			var pendingCelebrationText = null;
 			var bubbleEl = null;
 			var bubbleTimer = null;
 
@@ -368,15 +370,15 @@ window.__ModuleLoader__.load({
 			}
 
 			// --- 系统通知 ---
-			function sendSystemNotification() {
+			function sendSystemNotification(text, title) {
 				try {
 					if (!("Notification" in window)) return;
 					if (Notification.permission !== "granted") return;
 					var frames = petFrames();
-					var n = new Notification("DeepseekHarness 任务完成", {
-						body: NOTIFY_TEXT,
+					var n = new Notification(title || "DeepseekHarness", {
+						body: text,
 						icon: frames && frames.idle ? frames.idle : undefined,
-						tag: "user-theme-task-done"
+						tag: "user-theme-pet-notify"
 					});
 					n.onclick = function () { window.focus(); };
 				} catch (e) {}
@@ -391,11 +393,11 @@ window.__ModuleLoader__.load({
 				clearTimeout(bubbleTimer);
 			}
 
-			function showBubble(pet) {
+			function showBubble(pet, text) {
 				dismissBubble();
 				bubbleEl = document.createElement("div");
 				bubbleEl.className = "user-theme-pet-bubble";
-				bubbleEl.textContent = NOTIFY_TEXT;
+				bubbleEl.textContent = text;
 				document.body.appendChild(bubbleEl);
 				var rect = pet.getBoundingClientRect();
 				var bw = bubbleEl.offsetWidth;
@@ -409,31 +411,35 @@ window.__ModuleLoader__.load({
 				bubbleTimer = setTimeout(dismissBubble, 6000);
 			}
 
-			function celebrate() {
+			function celebrate(text) {
 				var s = loadSettings();
 				if (s.petEnabled === false) return;
 				var pet = document.getElementById("user-theme-pet");
 				if (!pet) return;
 				pet.classList.add("ut-celebrate");
 				setTimeout(function () { pet.classList.remove("ut-celebrate"); }, 1900);
-				showBubble(pet);
+				showBubble(pet, text);
 			}
 
 			// --- 事件流 ---
-			function handleDone(payload) {
+			function handleEvent(payload) {
 				var s = loadSettings();
 				if (s.notifyEnabled === false) return;
 				var isTest = payload && payload.test === true;
+				var isQuestion = payload && payload.type === "question";
+				var text = isQuestion ? NOTIFY_TEXT_QUESTION : NOTIFY_TEXT_DONE;
+				var title = isQuestion ? "DeepseekHarness 需要你定夺" : "DeepseekHarness 任务完成";
 				if (document.visibilityState === "visible") {
 					// 正看着页面，真实事件不打扰；测试事件立即演示
 					if (!isTest) return;
 					if (s.notifySound !== false) playDingDong();
-					celebrate();
+					celebrate(text);
 					return;
 				}
 				if (s.notifySound !== false) playDingDong();
-				if (s.notifySystem === true) sendSystemNotification();
+				if (s.notifySystem === true) sendSystemNotification(text, title);
 				pendingCelebration = true;
+				pendingCelebrationText = text;
 			}
 
 			try {
@@ -441,7 +447,7 @@ window.__ModuleLoader__.load({
 				es.onmessage = function (ev) {
 					var payload;
 					try { payload = JSON.parse(ev.data); } catch (e) { return; }
-					if (payload && payload.type === "done") handleDone(payload);
+					if (payload && (payload.type === "done" || payload.type === "question")) handleEvent(payload);
 				};
 				// onerror 无需处理：EventSource 自带指数退避重连
 			} catch (e) {}
@@ -450,7 +456,8 @@ window.__ModuleLoader__.load({
 				reportVisibility(false);
 				if (document.visibilityState === "visible" && pendingCelebration) {
 					pendingCelebration = false;
-					celebrate();
+					celebrate(pendingCelebrationText || NOTIFY_TEXT_DONE);
+					pendingCelebrationText = null;
 				}
 			});
 			window.addEventListener("pagehide", function () { reportVisibility(true); });
@@ -757,12 +764,21 @@ window.__ModuleLoader__.load({
 				order: 25,
 				label: "背景设置"
 			}, UserThemeSection));
+
+			// 页面加载即应用一次主题（含面板透明度），不要等「背景设置」组件挂载，
+			// 否则设置面板外壳先渲染时会回退到 CSS 里写死的 0.97，出现「首次打开不透明」。
+			function initTheme() {
+				try { applySettings(loadSettings()); } catch (e) {}
+			}
+
 			if (document.readyState === "loading") {
 				document.addEventListener("DOMContentLoaded", function () {
+					initTheme();
 					setupDesktopPet();
 					setupTaskNotify();
 				});
 			} else {
+				initTheme();
 				setupDesktopPet();
 				setupTaskNotify();
 			}

@@ -67,7 +67,8 @@ try:
 except ImportError:
     HAS_PIL = False
 
-BUBBLE_TEXT = "主人，你的任务完成了哦"
+BUBBLE_TEXT_DONE = "主人，你的任务完成了哦"
+BUBBLE_TEXT_QUESTION = "主人，有一些问题需要你来定夺"
 # 弹窗不再自动消失：只有用户点击弹窗（气泡或桌宠）才收起
 WINDOW_W = 260
 WINDOW_H = 220
@@ -249,7 +250,7 @@ class DesktopPet:
             highlightthickness=0,
             bd=0,
         )
-        self._draw_bubble()
+        self._draw_bubble(BUBBLE_TEXT_DONE)
 
         # 桌宠画面
         self.pet = tk.Label(self.root, bg=CHROMA, bd=0)
@@ -266,9 +267,10 @@ class DesktopPet:
         self._visible = False
         self.root.withdraw()
 
-    def _draw_bubble(self):
+    def _draw_bubble(self, text):
         """在 Canvas 上画圆角气泡：圆角矩形 + 指向桌宠的尾巴 + 文字。"""
         c = self.bubble
+        c.delete("all")  # 支持重绘（文案切换时复用）
         w = WINDOW_W - 24
         x1, y1, x2, y2, r = 6, 4, w - 6, 46, 12
         # 圆角矩形（经典 smooth polygon 配方）
@@ -289,7 +291,7 @@ class DesktopPet:
         )
         c.create_rectangle(cx - 8, y2 - 3, cx + 8, y2 + 1, fill=BUBBLE_FILL, outline="")
         c.create_text(
-            w // 2, (y1 + y2) // 2, text=BUBBLE_TEXT,
+            w // 2, (y1 + y2) // 2, text=text,
             fill=BUBBLE_TEXT_COLOR, font=BUBBLE_FONT,
         )
 
@@ -330,15 +332,17 @@ class DesktopPet:
             frames.setdefault(name, frames["idle"])
         return frames
 
-    def show(self):
+    def show(self, text=BUBBLE_TEXT_DONE):
         if self._visible:
-            # 已在显示：重复的完成事件重新弹跳 + 响铃，避免漏掉后续任务
+            # 已在显示：更新文案并重新弹跳 + 响铃，避免漏掉后续事件
+            self._draw_bubble(text)
             if self._hop_after_id is not None:
                 self.root.after_cancel(self._hop_after_id)
                 self._hop_after_id = None
             play_dingdong()
             self._hop(0)
             return
+        self._draw_bubble(text)
         self._visible = True
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -417,8 +421,11 @@ class DesktopPet:
                 if not isinstance(payload, dict):
                     continue
                 ptype = payload.get("type")
-                if ptype == "done" and payload.get("pageVisible") is False:
-                    self.show()
+                if payload.get("pageVisible") is False:
+                    if ptype == "done":
+                        self.show(BUBBLE_TEXT_DONE)
+                    elif ptype == "question":
+                        self.show(BUBBLE_TEXT_QUESTION)
                 elif ptype == "visibility" and payload.get("pageVisible") is True:
                     # 用户回到 Harness 页面，自动收起
                     self.hide()

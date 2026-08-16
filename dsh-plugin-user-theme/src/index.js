@@ -152,6 +152,18 @@ function setupNotify(ctx) {
     runningSince.delete(agent.id);
   });
 
+  // --- 提问检测：agent 调用 ask_user_question 工具即"向用户提问" ---
+  ctx.on("tools/execute", (exec, next) => {
+    try {
+      if (exec.name === "ask_user_question" && config.notifyEnabled) {
+        broadcast({ type: "question", pageVisible: pageVisible(), at: Date.now() });
+      }
+    } catch {
+      /* 单个事件异常不影响工具链 */
+    }
+    return next();
+  });
+
   // --- 路由 ---
   const webServer = ctx.webServer;
   const disposers = [];
@@ -239,13 +251,16 @@ function setupNotify(ctx) {
     })
   );
 
-  // 测试路由：广播一条带 test 标记的完成事件（pageVisible 固定 false，保证桌面宠物强制弹出）
+  // 测试路由：广播一条带 test 标记的事件（pageVisible 固定 false，保证桌面宠物强制弹出）
+  // 支持 ?type=question|done 指定事件类型，默认 done
   disposers.push(
     webServer.register({
       kind: "exact",
       path: `${PET_ROUTE_PREFIX}/pet-test`,
       handler: (req, res) => {
-        broadcast({ type: "done", durationMs: 0, pageVisible: false, test: true, at: Date.now() });
+        const url = new URL(req.url, "http://localhost");
+        const evType = url.searchParams.get("type") === "question" ? "question" : "done";
+        broadcast({ type: evType, durationMs: 0, pageVisible: false, test: true, at: Date.now() });
         res.writeHead(204);
         res.end();
       },
