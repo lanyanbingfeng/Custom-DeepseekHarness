@@ -340,6 +340,148 @@ function setupNotify(ctx) {
   });
 }
 
+/* ===== DeepSeek API 余额查询（Node 端代理，浏览器不接触 API Key） =====
+ *
+ * 1. 经 harness 的 credentials seam 解析 DEEPSEEK_API_KEY（与聊天请求走同一凭据通道）；
+ * 2. 服务端请求 {baseURL}/user/balance（默认 https://api.deepseek.com），解析 balance_infos[0]；
+ * 3. 结果在内存中短时缓存（默认 60s），合并并发请求，避免频繁调用余额接口。
+ * 可选配置文件 ~/.dsh/user-theme-balance.json：{ "baseURL": "...", "cacheTtlSec": 60 }
+ */
+const BALANCE_CONFIG_PATH = join(homedir(), ".dsh", "user-theme-balance.json");
+const BALANCE_DEFAULTS = {
+  baseURL: process.env.DSH_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
+  cacheTtlSec: 60,
+};
+const BALANCE_ROUTE = `${PET_ROUTE_PREFIX}/balance`;
+const BALANCE_TIMEOUT_MS = 8000;
+
+function loadBalanceConfig() {
+  try {
+    const saved = JSON.parse(readFileSync(BALANCE_CONFIG_PATH, "utf8"));
+    return { ...BALANCE_DEFAULTS, ...saved };
+  } catch {
+    return { ...BALANCE_DEFAULTS };
+  }
+}
+
+async function fetchDeepSeekBalance(baseURL, apiKey) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), BALANCE_TIMEOUT_MS);
+  try {
+    const resp = await fetch(`${baseURL.replace(/\/+$/, "")}/user/balance`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+      signal: ctrl.signal,
+    });
+    const text = await resp.text();
+    let body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      /* 非 JSON 错误页 */
+    }
+    if (!resp.ok) {
+      const err = new Error(body?.error?.message || `HTTP ${resp.status}`);
+      err.status = resp.status;
+      throw err;
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function setupBalance(ctx) {
+  // { at, data, pending }
+  let cache = null;
+  const webServer = ctx.webServer;
+
+  const sendJson = (res, status, payload) => {
+    res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(payload));
+  };
+
+  const disposer = webServer.register({
+    kind: "exact",
+    path: BALANCE_ROUTE,
+    handler: async (req, res) => {
+      try {
+        const url = new URL(req.url, "http://localhost");
+        const force = url.searchParams.get("refresh") === "1";
+        const cfg = loadBalanceConfig();
+        const now = Date.now();
+
+        if (!force && cache?.data && now - cache.at < cfg.cacheTtlSec * 1000) {
+          sendJson(res, 200, { ...cache.data, cached: true });
+          return;
+        }
+        if (!force && cache?.pending) {
+          const data = await cache.pending;
+          sendJson(res, 200, { ...data, cached: true });
+          return;
+        }
+
+        // 凭据：优先 credentials seam（Models 页写入/refs），回退启动环境变量
+        let apiKey;
+        const credentials = typeof ctx.get === "function" ? ctx.get("credentials") : undefined;
+        if (credentials) {
+          const hit = await credentials.resolve("DEEPSEEK_API_KEY");
+          apiKey = hit?.value;
+        }
+        if (!apiKey) apiKey = process.env.DEEPSEEK_API_KEY;
+        if (!apiKey) {
+          sendJson(res, 200, {
+            ok: false,
+            code: "NO_API_KEY",
+            message: "未配置 DEEPSEEK_API_KEY（请在 DSH 模型设置中保存 DeepSeek API Key）",
+          });
+          return;
+        }
+
+        const pending = fetchDeepSeekBalance(cfg.baseURL, apiKey)
+          .then((body) => {
+            // 线上接口字段为 balance_infos 数组（每币种一项，通常只有 CNY）；
+            // 兼容历史/网关上可能出现的单数 balance_info 对象。
+            const info = Array.isArray(body?.balance_infos)
+              ? body.balance_infos[0]
+              : body?.balance_info;
+            const data = {
+              ok: body?.is_available === true,
+              available: body?.is_available === true,
+              balance: info ? Number(info.total_balance) : null,
+              granted: info ? Number(info.granted_balance) : null,
+              toppedUp: info ? Number(info.topped_up_balance) : null,
+              currency: info?.currency || "CNY",
+              at: Date.now(),
+            };
+            cache = { at: Date.now(), pending: null, data };
+            return data;
+          })
+          .catch((err) => {
+            cache = null;
+            return {
+              ok: false,
+              code: err.status === 401 ? "UNAUTHORIZED" : "FETCH_FAILED",
+              status: err.status,
+              message: err?.message || String(err),
+              at: Date.now(),
+            };
+          });
+
+        cache = { at: now, pending, data: cache?.data ?? null };
+        sendJson(res, 200, await pending);
+      } catch (err) {
+        sendJson(res, 200, { ok: false, code: "INTERNAL", message: err?.message || String(err) });
+      }
+    },
+  });
+
+  ctx.on("dispose", () => disposer());
+}
+
 function buildCss() {
   const buf = readFileSync(BG_PATH);
   const b64 = buf.toString("base64");
@@ -647,6 +789,171 @@ body[data-ds-dark-theme] .VOzbGW_options {
   0% { opacity: 0; transform: translateY(8px) scale(0.92); }
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
+
+/* ===== 侧边栏 DeepSeek 余额卡片（sidebar.footer.action） ===== */
+.user-theme-balance {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: linear-gradient(135deg, rgba(74, 143, 214, 0.20), rgba(44, 44, 46, 0.32));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: var(--dsw-alias-label-primary, #e8f0ec);
+  font-family: var(--dsw-font-family);
+  cursor: default;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.user-theme-balance:hover {
+  border-color: rgba(109, 158, 208, 0.45);
+}
+.ut-bal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #c4d2ca);
+  letter-spacing: 0.02em;
+}
+.ut-bal-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ut-bal-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: #4a8fd6;
+  box-shadow: 0 0 6px rgba(74, 143, 214, 0.8);
+}
+.ut-bal-dot.ut-ok { background: #46c98d; box-shadow: 0 0 6px rgba(70, 201, 141, 0.8); }
+.ut-bal-dot.ut-warn { background: #f0a94b; box-shadow: 0 0 6px rgba(240, 169, 75, 0.8); }
+.ut-bal-dot.ut-err { background: #e06a6a; box-shadow: 0 0 6px rgba(224, 106, 106, 0.8); }
+.ut-bal-refresh {
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #c4d2ca);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.ut-bal-refresh:hover { color: #6d9ed0; background: rgba(255,255,255,0.06); }
+.ut-bal-refresh svg { width: 12px; height: 12px; display: block; }
+.ut-bal-refresh.ut-spinning svg { animation: ut-bal-spin 0.8s linear infinite; }
+@keyframes ut-bal-spin { to { transform: rotate(360deg); } }
+.ut-bal-amount {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ut-bal-amount .ut-bal-currency {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-secondary, #c4d2ca);
+  margin-left: 4px;
+}
+.ut-bal-meta {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-secondary, #c4d2ca);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ut-bal-meta.ut-err-text { color: #e89a9a; }
+.ut-bal-meta.ut-muted { opacity: 0.75; }
+.ut-bal-skeleton {
+  margin-top: 7px;
+  height: 18px;
+  width: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.06) 25%, rgba(255,255,255,0.16) 37%, rgba(255,255,255,0.06) 63%);
+  background-size: 400% 100%;
+  animation: ut-bal-shimmer 1.3s ease infinite;
+}
+@keyframes ut-bal-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+/* 卡片主体：左侧金额/时间，右侧两个上下堆叠的小填充按钮 */
+.user-theme-balance { margin: 0 0 8px; }
+.ut-bal-body {
+  margin-top: 6px;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.ut-bal-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.ut-bal-info .ut-bal-amount { margin-top: 0; }
+.ut-bal-actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+.ut-bal-action {
+  box-sizing: border-box;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.12));
+  border-radius: 9px;
+  background: var(--dsw-alias-button-elevated-fill, rgba(255, 255, 255, 0.10));
+  color: var(--dsw-alias-label-primary, #e8f0ec);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ut-bal-action:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.18));
+  border-color: var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.22));
+}
+.ut-bal-action svg { width: 13px; height: 13px; flex: none; display: block; }
+/* 侧边栏折叠为轨道时：只显示状态圆点 */
+.user-theme-balance.ut-rail {
+  width: 32px;
+  padding: 6px 0;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+}
+.user-theme-balance.ut-rail .ut-bal-head,
+.user-theme-balance.ut-rail .ut-bal-body { display: none; }
+.user-theme-balance.ut-rail .ut-bal-dot { width: 9px; height: 9px; }
 `;
 
   const petFrames = readPetFrames();
@@ -675,6 +982,7 @@ export function apply(ctx) {
     );
 
     setupNotify(httpCtx);
+    setupBalance(httpCtx);
   });
 }
 

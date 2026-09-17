@@ -1,8 +1,14 @@
 # dsh-plugin-user-theme
 
-DSH（DeepSeek Harness）定制主题插件：**背景图 + 楷体 + 深蓝主色 + 半透明磨砂 + Q 版桌宠**，并提供一个原生的「背景设置」标签，可随时在界面上调背景、透明度、字体、字号与桌宠。
+DSH（DeepSeek Harness）定制主题插件：**背景图 + 楷体 + 深蓝主色 + 半透明磨砂 + Q 版桌宠**，并提供一个原生的「背景设置」标签，可随时在界面上调背景、透明度、字体、字号与桌宠；侧边栏底部还内置一张 **DeepSeek API 余额卡片**，实时显示账户余额并提供「API 平台 / 在线对话」快捷入口。
 
 不修改任何 npm 包源码，完全基于 DSH 公开插件 API。
+
+## 功能一览
+
+- 🎨 **主题定制**：背景图、楷体、深蓝主色、各层半透明磨砂（见下）
+- 🐾 **Q 版桌宠 + 任务完成提醒**：呼吸眨眼、拖拽互动、三级提醒（见下）
+- 💰 **DeepSeek 余额卡片**（v0.2.0 新增，见文末 [DeepSeek API 余额卡片](#deepseek-api-余额卡片)）
 
 ## 效果
 
@@ -29,10 +35,10 @@ DSH（DeepSeek Harness）定制主题插件：**背景图 + 楷体 + 深蓝主�
 
 | 端 | 文件 | 职责 |
 |----|------|------|
-| **Node 端** | `src/index.js` | 通过 `webServer.tapIndex()` 注入主题 CSS 与 `window.__USER_THEME_ASSETS__`（壁纸 base64） |
-| **Client 端** | `lib/client.js` | 通过官方 `settings.section` slot 把「背景设置」注册为设置面板第 5 个原生标签，React 组件负责交互与实时预览 |
+| **Node 端** | `src/index.js` | 通过 `webServer.tapIndex()` 注入主题 CSS 与 `window.__USER_THEME_ASSETS__`（壁纸 base64）；任务提醒 SSE 路由与 Python 桌宠托管；`/balance` 余额查询代理（凭据在服务端解析，浏览器不接触 API Key） |
+| **Client 端** | `lib/client.js` | 通过官方 `settings.section` slot 把「背景设置」注册为设置面板原生标签；通过 `sidebar.footer.action` slot 在侧边栏底部渲染余额卡片；React 组件负责交互与实时预览 |
 
-关键点：设置标签走的是 **DSH 官方 client 插件机制**（`dsh.client.platform = "web"` + `ctx.slots.inject("settings.section", ...)`），由 React 原生渲染和切换，**不做任何 DOM hack**，因此不会出现卡死或内容叠加。
+关键点：设置标签和余额卡片都走的是 **DSH 官方 client 插件机制**（`dsh.client.platform = "web"` + `ctx.slots.inject(...)`），由 React 原生渲染，**不做任何 DOM hack**，因此不会出现卡死或内容叠加。
 
 ## 安装（本地 file: 引用，免发布）
 
@@ -120,9 +126,9 @@ dsh-plugin-user-theme/
 ├── package.json           # npm 元数据 + dsh.bundle + dsh.client.web 声明
 ├── cordis.patch.yml       # bundle patch（挂载入口）
 ├── src/
-│   └── index.js           # Node 端入口：注入 CSS + 壁纸/桌宠帧 base64；agent/status 耗时检测、pet-events(SSE)/pet-visibility/pet-config 路由、Python 桌宠托管
+│   └── index.js           # Node 端入口：注入 CSS + 壁纸/桌宠帧 base64；agent/status 耗时检测、pet-events(SSE)/pet-visibility/pet-config 路由、Python 桌宠托管、balance 余额查询代理
 ├── lib/
-│   └── client.js          # Client 端 bundle：注册「背景设置」section + 桌宠逻辑 + 任务完成提醒（SSE 消费/可见性上报/提示音/系统通知）
+│   └── client.js          # Client 端 bundle：注册「背景设置」section + 桌宠逻辑 + 任务完成提醒（SSE 消费/可见性上报/提示音/系统通知）+ 侧边栏余额卡片与快捷入口
 ├── desktop_pet.py         # 独立桌面宠物：tkinter 置顶透明窗，SSE 订阅完成事件，跳跃+气泡+提示音
 ├── assets/
 │   ├── bg.jpg             # 默认背景图
@@ -144,6 +150,49 @@ dsh-plugin-user-theme/
 
 替换 `assets/pet/` 下对应 PNG 即可（保持透明背景、高度约 320px 效果最佳）；缺帧时自动回退 `idle.png`，重启 DSH 后生效。
 
+## DeepSeek API 余额卡片
+
+侧边栏底部（设置按钮正上方）显示一张磨砂余额卡片，并在卡片内部右侧提供两个快捷入口按钮。
+
+**卡片布局**
+
+```
+┌───────────────────────────────────────┐
+│ ● DeepSeek 余额            ⟳ 刷新     │
+│                    ┌────────────────┐ │
+│  41.34 元          │ 📊 API 平台    │ │
+│  更新于 20:10      │ 💬 在线对话    │ │
+│                    └────────────────┘ │
+└───────────────────────────────────────┘
+              [ 设置 ]
+```
+
+- **左栏**：大号余额 + 「更新于 HH:MM」；**右栏**：刷新按钮正下方两个上下堆叠的小填充按钮（仿侧边栏「新会话 / 设置」按钮，无超链接外观）
+- 状态圆点：🟢 正常 / 🟠 余额低于 ¥5（阈值写死在 client 端）/ 🔴 Key 无效、未配置或查询失败；首次加载显示骨架屏
+- 「API 平台」→ `https://platform.deepseek.com/usage`，「在线对话」→ `https://chat.deepseek.com/`，均新标签页打开
+- 进入页面自动拉取，此后每 5 分钟刷新，切回标签页立即刷新，点刷新图标强制拉取
+- 侧边栏折叠为图标轨时，卡片收成一个状态圆点（hover 显示金额），按钮随卡片隐藏
+- 静态高保真预览见仓库 `demo/balance-card-preview.html`（直接用浏览器打开即可）
+
+**安全模型：API Key 不出 Node 端**
+
+```
+浏览器 ──fetch──► /plugins/dsh-plugin-user-theme/balance
+                          │
+                  Node 插件（唯一持 Key 方）
+                          │  credentials.resolve("DEEPSEEK_API_KEY")
+                          │  （harness credentials seam，回退 $DEEPSEEK_API_KEY）
+                          ▼
+                  GET https://api.deepseek.com/user/balance
+```
+
+- 浏览器只请求插件自己的本机路由，**永远拿不到 API Key**
+- Key 经 harness 的 `credentials` 服务解析（与聊天请求走同一凭据通道，即 Models 设置页保存的那个 key），未配置时回退启动环境变量 `DEEPSEEK_API_KEY`
+- 服务端结果内存缓存 60 秒并合并并发请求，8 秒超时；余额接口字段兼容线上的 `balance_infos[]` 数组与旧的 `balance_info` 对象
+- 可选配置文件 `~/.dsh/user-theme-balance.json`：`{ "baseURL": "https://api.deepseek.com", "cacheTtlSec": 60 }`（网关 / 自建端点可改 `baseURL`，也支持环境变量 `DSH_DEEPSEEK_BASE_URL`、`DEEPSEEK_BASE_URL`）
+
+**挂载位置**：Client 端通过官方 `sidebar.footer.action` list slot 注册（owner props 为 `{ wide }`，折叠态据此切换圆点）。由于该 slot 是横向 list，余额卡片内部的多块内容由单一 React 组件根承载，不额外注册多个 slot 项。
+
 ## 卸载
 
 1. 编辑 `cordis.patch.yml`，删掉 `user-theme` 那条 insert
@@ -152,10 +201,11 @@ dsh-plugin-user-theme/
 
 ## 兼容性
 
-- DSH 0.1.0-rc.6
+- 开发验证于 DSH 0.1.5-rc.1（早期版本在 0.1.0-rc.6 亦可运行）
 - Node.js ≥ 18
-- 基于 DSH 公开 API：`webServer.tapIndex` + `webServer.register` + `settings.section` slot + `agent/status` 事件
-- 独立桌面宠物（可选）：Python 3（标准库 tkinter，Windows 自带 winsound）；缺失时仅浏览器内提醒可用
+- 基于 DSH 公开 API：`webServer.tapIndex` + `webServer.register` + `settings.section` slot + `sidebar.footer.action` slot + `agent/status` 事件 + `credentials` 凭据服务
+- 余额查询需要已配置 DeepSeek API Key（DSH 模型设置页保存，或导出 `DEEPSEEK_API_KEY`）
+- 独立桌面宠物（可选）：Python 3（标准库 tkinter，Windows 自带 winsound）；缺失时仅浏览器内提醒可用。系统 Python 若不带 tkinter，可用环境变量 `DSH_PET_PYTHON` 指定其它解释器
 
 ## License
 

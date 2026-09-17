@@ -468,6 +468,156 @@ window.__ModuleLoader__.load({
 
 		var h = React.createElement;
 
+		/* ===== 侧边栏 DeepSeek 余额卡片 ===== */
+		var BALANCE_API = "/plugins/dsh-plugin-user-theme/balance";
+		var BALANCE_REFRESH_MS = 5 * 60 * 1000;
+
+		function formatMoney(n) {
+			if (n == null || isNaN(n)) return "--";
+			var s = Math.abs(n) >= 100 ? n.toFixed(0) : n.toFixed(2);
+			// 千分位
+			var parts = s.split(".");
+			parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+			return parts.join(".");
+		}
+		function currencyLabel(currency) {
+			if (currency === "CNY") return "元";
+			return currency || "";
+		}
+		function formatTime(ts) {
+			if (!ts) return "";
+			var d = new Date(ts);
+			var p = function (x) { return (x < 10 ? "0" : "") + x; };
+			return p(d.getHours()) + ":" + p(d.getMinutes());
+		}
+
+		var RefreshIcon = h("svg", { viewBox: "0 0 24 24", width: 12, height: 12, fill: "none",
+			stroke: "currentColor", "strokeWidth": 2.2, "strokeLinecap": "round", "strokeLinejoin": "round" },
+			h("path", { d: "M21 12a9 9 0 1 1-2.64-6.36" }),
+			h("path", { d: "M21 3v6h-6" })
+		);
+		// API 用量：柱状图（尺寸由 .ut-bal-action svg 控制，保持 13px 紧凑）
+		var ChartIcon = h("svg", { viewBox: "0 0 24 24", fill: "none",
+			stroke: "currentColor", "strokeWidth": 2, "strokeLinecap": "round", "strokeLinejoin": "round" },
+			h("path", { d: "M3 3v18h18" }),
+			h("path", { d: "M8 17v-5" }),
+			h("path", { d: "M13 17V8" }),
+			h("path", { d: "M18 17v-3" })
+		);
+		// 在线对话：气泡
+		var ChatIcon = h("svg", { viewBox: "0 0 24 24", fill: "none",
+			stroke: "currentColor", "strokeWidth": 2, "strokeLinecap": "round", "strokeLinejoin": "round" },
+			h("path", { d: "M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" })
+		);
+		var QUICK_LINKS = [
+			{ label: "API 平台", title: "DeepSeek API 开放平台 · 用量明细", url: "https://platform.deepseek.com/usage", icon: ChartIcon },
+			{ label: "在线对话", title: "DeepSeek 对话平台", url: "https://chat.deepseek.com/", icon: ChatIcon }
+		];
+		// 卡片内部右侧的两个小填充按钮：刷新按钮下方、余额数字右边，纵向堆叠。
+		function BalanceActions() {
+			return h("div", { className: "ut-bal-actions" },
+				QUICK_LINKS.map(function (item) {
+					return h("a", {
+						key: item.url,
+						className: "ut-bal-action",
+						href: item.url,
+						target: "_blank",
+						rel: "noopener noreferrer",
+						title: item.title
+					}, item.icon, h("span", { className: "ut-bal-action-label" }, item.label));
+				})
+			);
+		}
+
+		function BalanceCard(props) {
+			var wide = props.wide !== false;
+			var dataState = React.useState(null); // { ok, balance, currency, at, code, message, ... }
+			var data = dataState[0];
+			var setData = dataState[1];
+			var loadingState = React.useState(true);
+			var loading = loadingState[0];
+			var setLoading = loadingState[1];
+
+			var load = React.useCallback(function (force) {
+				setLoading(true);
+				fetch(BALANCE_API + (force ? "?refresh=1" : ""), { headers: { Accept: "application/json" } })
+					.then(function (r) { return r.json(); })
+					.then(function (j) { setData(j); })
+					.catch(function () { setData({ ok: false, code: "FETCH_FAILED", message: "网络错误" }); })
+					.then(function () { setLoading(false); });
+			}, []);
+
+			React.useEffect(function () {
+				load(false);
+				var timer = setInterval(function () { load(false); }, BALANCE_REFRESH_MS);
+				var onVis = function () { if (!document.hidden) load(false); };
+				document.addEventListener("visibilitychange", onVis);
+				return function () {
+					clearInterval(timer);
+					document.removeEventListener("visibilitychange", onVis);
+				};
+			}, [load]);
+
+			// 折叠轨道态：只留状态圆点，hover 显示文字提示
+			if (!wide) {
+				var railTitle = "DeepSeek 余额";
+				if (loading && !data) railTitle = "查询余额中…";
+				else if (data && data.ok) railTitle = "余额 " + formatMoney(data.balance) + " " + currencyLabel(data.currency);
+				else if (data) railTitle = data.code === "NO_API_KEY" ? "未配置 API Key" : (data.message || "余额查询失败");
+				var railDot = "ut-bal-dot " + (loading && !data ? "" : !data ? "" : data.ok ? (data.balance != null && data.balance < 5 ? "ut-warn" : "ut-ok") : "ut-err");
+				return h("div", { className: "user-theme-balance ut-rail", title: railTitle, role: "status" },
+					h("span", { className: railDot })
+				);
+			}
+
+			var dotCls = "ut-bal-dot ";
+			var metaLine = null;
+			if (loading && !data) {
+				dotCls += "";
+			} else if (!data) {
+				dotCls += "ut-err";
+			} else if (data.ok) {
+				dotCls += data.balance != null && data.balance < 5 ? "ut-warn" : "ut-ok";
+				metaLine = h("div", { className: "ut-bal-meta ut-muted" },
+					"更新于 " + formatTime(data.at));
+			} else {
+				dotCls += "ut-err";
+				var msg = data.code === "NO_API_KEY"
+					? "未配置 API Key"
+					: data.code === "UNAUTHORIZED"
+						? "API Key 无效"
+						: (data.message || "查询失败");
+				metaLine = h("div", { className: "ut-bal-meta ut-err-text", title: data.message || "" }, msg);
+			}
+
+			return h("div", { className: "user-theme-balance", role: "status" },
+				h("div", { className: "ut-bal-head" },
+					h("span", { className: "ut-bal-title" },
+						h("span", { className: dotCls }),
+						"DeepSeek 余额"
+					),
+					h("button", {
+						className: "ut-bal-refresh" + (loading ? " ut-spinning" : ""),
+						title: "刷新余额",
+						onClick: function (e) { e.stopPropagation(); load(true); }
+					}, RefreshIcon)
+				),
+				h("div", { className: "ut-bal-body" },
+					h("div", { className: "ut-bal-info" },
+						(loading && !data)
+							? h("div", { className: "ut-bal-skeleton" })
+							: h("div", { className: "ut-bal-amount" },
+								(data && data.ok)
+									? [formatMoney(data.balance), h("span", { className: "ut-bal-currency", key: "c" }, currencyLabel(data.currency))]
+									: "--"
+							),
+						metaLine
+					),
+					h(BalanceActions)
+				)
+			);
+		}
+
 		// 滑块行
 		function SliderRow(props) {
 			return h("div", { className: "ut-row" },
@@ -764,6 +914,14 @@ window.__ModuleLoader__.load({
 				order: 25,
 				label: "背景设置"
 			}, UserThemeSection));
+
+			// 侧边栏底部（设置按钮上方）的 DeepSeek 余额卡片。
+			// owner props: { wide } —— 折叠成轨道时只渲染状态圆点。
+			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
+				name: "sidebar.footer.action",
+				id: "user-theme-balance",
+				order: 10
+			}, BalanceCard));
 
 			// 页面加载即应用一次主题（含面板透明度），不要等「背景设置」组件挂载，
 			// 否则设置面板外壳先渲染时会回退到 CSS 里写死的 0.97，出现「首次打开不透明」。
