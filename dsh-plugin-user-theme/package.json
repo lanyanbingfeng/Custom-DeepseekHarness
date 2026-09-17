@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-user-theme",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH 定制主题插件：背景图 + 楷体 + 深蓝主色 + 半透明磨砂，内置原生「背景设置」标签（settings.section slot）；侧边栏 DeepSeek API 余额卡片（sidebar.footer.action slot）+ API 平台/在线对话快捷入口。不修改任何 npm 包源码。",
   "type": "module",
   "main": "src/index.js",

@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BG_PATH = join(__dirname, "..", "assets", "bg.jpg");
 const PET_DIR = join(__dirname, "..", "assets", "pet");
+const PET_SCRIPT = join(__dirname, "..", "desktop_pet.py");
 const PET_FRAMES = ["idle", "blink", "wave", "wink", "jump"];
 
 // 读取桌宠动作帧（assets/pet/*.png）转 base64。
@@ -96,7 +97,10 @@ function setupNotify(ctx) {
   const visibleTabs = new Map(); // clientId -> { visible, at }
   const sseByClient = new Map(); // clientId -> ServerResponse（断开时据此清理可见性）
   let lastDone = null; // 最近一次完成事件，供 SSE 断线重连时补发
-  let petProc = null;
+  let petProc = null; // 当前托管的桌宠进程
+  let petWanted = false; // 期望状态：清理历史遗留期间若被关闭，则不再启动
+  let petStarting = false; // 正在「清理遗留 → 启动」的窗口内
+  let petCleanup = null; // 进行中的清理 Promise，多入口共享以消除竞态
 
   const pageVisible = () => {
     const now = Date.now();
@@ -242,7 +246,7 @@ function setupNotify(ctx) {
           saveNotifyConfig(config);
           if (petToggled) {
             if (config.desktopPetEnabled) startDesktopPet();
-            else stopDesktopPet();
+            else stopDesktopPet(true); // 用户主动关闭：连历史遗留一起收掉
           }
         }
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -284,43 +288,115 @@ function setupNotify(ctx) {
   }, SSE_HEARTBEAT_MS);
 
   // --- Python 桌面宠物进程托管 ---
-  function startDesktopPet() {
-    if (petProc) return;
-    const script = join(__dirname, "..", "desktop_pet.py");
-    if (!existsSync(script)) return;
-    const python = process.env.DSH_PET_PYTHON || "python";
-    const host = webServer.host === "0.0.0.0" ? "127.0.0.1" : webServer.host;
-    const sseUrl = `http://${host}:${webServer.port}${PET_ROUTE_PREFIX}/pet-events`;
+  //
+  // 桌宠是 detached + unref 的独立进程（DSH 关掉后仍要显示提醒），因此父进程退出时它会留存。
+  // 若不在启动前清理，每次 dsh web 重启都会多留一个桌宠窗口、越积越多；另外在 Windows 上
+  // `python` 常常是先启动一个 shim（如 .local\bin\python.exe）再拉起真实解释器，只 kill 直接
+  // 子进程会留下孤儿的真实解释器。因此这里两处加固：启动前清遗留 + 停止时结束整棵进程树。
+  /**
+   * 结束此前遗留的桌宠进程（shim 与真实解释器都会被匹配到）。
+   * 仅匹配命令行中含本插件 `desktop_pet.py` 绝对路径的 python 进程，不误伤其它 python。
+   * 必须等它结束再启动新桌宠，否则新进程也会被一起杀掉。
+   * @returns 清理完成的 Promise（失败或超时也不阻塞启动）
+   */
+  function killStrayDesktopPets() {
+    if (process.platform !== "win32") return Promise.resolve();
+    const psCmd = [
+      "$ErrorActionPreference='SilentlyContinue';",
+      "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" |",
+      "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:UT_PET_SCRIPT) } |",
+      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    ].join(" ");
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      try {
+        const killer = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCmd], {
+          env: { ...process.env, UT_PET_SCRIPT: PET_SCRIPT },
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", finish);
+        killer.on("exit", finish);
+        setTimeout(finish, 8000).unref(); // 兜底：清理异常也不拖住启动
+      } catch {
+        finish();
+      }
+    });
+  }
+
+  /**
+   * 共享的清理入口：并发调用复用同一个 Promise，保证「启动前的清理」一定等到
+   * 「停止时触发的清理」结束后才 spawn，不会出现清理迟到杀掉新桌宠的竞态。
+   */
+  function cleanupStrayPets() {
+    if (!petCleanup) petCleanup = killStrayDesktopPets().finally(() => { petCleanup = null; });
+    return petCleanup;
+  }
+
+  async function startDesktopPet() {
+    petWanted = true;
+    if (petProc || petStarting) return;
+    if (!existsSync(PET_SCRIPT)) return;
+    petStarting = true;
     try {
-      petProc = spawn(python, [script, "--sse", sseUrl, "--assets", PET_DIR], {
+      await cleanupStrayPets();
+      if (!petWanted || petProc) return; // 清理期间已被关闭
+      const python = process.env.DSH_PET_PYTHON || "python";
+      const host = webServer.host === "0.0.0.0" ? "127.0.0.1" : webServer.host;
+      const sseUrl = `http://${host}:${webServer.port}${PET_ROUTE_PREFIX}/pet-events`;
+      const proc = spawn(python, [PET_SCRIPT, "--sse", sseUrl, "--assets", PET_DIR], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
       });
-      petProc.on("error", (err) => {
-        petProc = null;
+      petProc = proc;
+      proc.on("error", (err) => {
+        if (petProc === proc) petProc = null;
         console.warn(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
       });
-      petProc.on("exit", (code, signal) => {
-        petProc = null;
-        if (code !== 0) {
+      proc.on("exit", (code, signal) => {
+        const unexpected = petProc === proc; // 主动 stop 时 petProc 已置空，不重复报警
+        if (unexpected) petProc = null;
+        if (unexpected && code !== 0) {
           console.warn(`[user-theme] 桌面宠物进程异常退出（code=${code} signal=${signal}），浏览器内提醒不受影响`);
         }
       });
-      petProc.unref();
+      proc.unref();
     } catch (err) {
-      petProc = null;
       console.warn(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
+    } finally {
+      petStarting = false;
     }
   }
-  function stopDesktopPet() {
-    if (!petProc) return;
-    try {
-      petProc.kill();
-    } catch {
-      /* 已退出 */
-    }
+
+  /**
+   * 结束当前托管的桌宠。
+   * @param sweep 是否连带清扫历史遗留桌宠。仅在「用户主动关闭」时为 true：
+   *   dispose（插件重载/退出）只结束自己的进程树——新实例启动前会自行清扫，
+   *   此处若也清扫，迟到的清理会误杀新实例刚拉起的桌宠。
+   */
+  function stopDesktopPet(sweep = false) {
+    petWanted = false;
+    const pid = petProc?.pid;
     petProc = null;
+    if (pid) {
+      try {
+        if (process.platform === "win32") {
+          // /T 连同 shim 拉起的真实解释器一起结束，避免留下孤儿窗口
+          spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
+        } else {
+          process.kill(pid, "SIGTERM");
+        }
+      } catch {
+        /* 已退出 */
+      }
+    }
+    if (sweep) void cleanupStrayPets();
   }
   if (config.desktopPetEnabled) startDesktopPet();
 

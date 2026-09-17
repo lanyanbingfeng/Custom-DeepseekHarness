@@ -116,6 +116,7 @@ agent/status 事件 ──► Node 插件（耗时统计 + 阈值过滤 + 子代
 - **可见性上报**：每个页签以唯一 clientId 经 `POST /pet-visibility` 上报（visibilitychange + 20s 心跳 + pagehide sendBeacon），Node 端 60 秒未上报自动剔除
 - **配置**：`GET/POST /pet-config` 持久化到 `~/.dsh/user-theme-pet-notify.json`（不污染插件目录）；提醒总开关/阈值/桌面宠物三项由服务端权威存储、多页签共享；提示音/系统通知为每浏览器本地偏好
 - **Python 桌宠托管**：`desktopPetEnabled` 时 Node 端 `spawn`（detached + windowsHide）拉起 `desktop_pet.py`（tkinter 透明置顶窗，纯标准库，提示音为 winsound 播放内存生成的 wav）；启动失败仅记日志、不影响浏览器功能；插件 dispose 时回收进程
+- **单实例保证**：桌宠是 detached 独立进程（DSH 关掉后仍要显示提醒），父进程退出后它会留存，因此启动前会先清理历史遗留的桌宠进程——只匹配命令行含本插件 `desktop_pet.py` 路径的 python，不误伤其它 python；停止时用 `taskkill /T /F` 结束整棵进程树（Windows 上 `python` 常先起一个 shim 再拉起真实解释器，只杀直接子进程会留下孤儿）。清理与启动串行化，不会出现「清理迟到杀掉新桌宠」的竞态
 - **独立运行**：`python desktop_pet.py --sse http://127.0.0.1:3080/plugins/dsh-plugin-user-theme/pet-events --assets <插件目录>/assets/pet`
 - **系统通知授权**：在「背景设置 → 任务完成提醒」里打开「系统通知」开关时会触发浏览器授权请求
 
@@ -206,6 +207,23 @@ dsh-plugin-user-theme/
 - 基于 DSH 公开 API：`webServer.tapIndex` + `webServer.register` + `settings.section` slot + `sidebar.footer.action` slot + `agent/status` 事件 + `credentials` 凭据服务
 - 余额查询需要已配置 DeepSeek API Key（DSH 模型设置页保存，或导出 `DEEPSEEK_API_KEY`）
 - 独立桌面宠物（可选）：Python 3（标准库 tkinter，Windows 自带 winsound）；缺失时仅浏览器内提醒可用。系统 Python 若不带 tkinter，可用环境变量 `DSH_PET_PYTHON` 指定其它解释器
+
+## 更新日志
+
+### 0.2.1
+
+- **修复**：每次 `dsh web` 重启都会多留一个 Python 桌宠窗口、逐次累积的问题（桌宠是 detached 独立进程，原先启动前不清理历史遗留）。现在启动前先清理遗留桌宠，停止时用 `taskkill /T /F` 结束整棵进程树，并保证「清理 → 启动」串行，不会误杀新桌宠
+
+### 0.2.0
+
+- **新增**：侧边栏 DeepSeek API 余额卡片（`sidebar.footer.action` slot），含状态点、骨架屏、自动/手动刷新、折叠态圆点
+- **新增**：`/balance` 服务端代理，API Key 经 credentials seam 在 Node 端解析，浏览器不接触
+- **新增**：卡片内部右侧「API 平台 / 在线对话」两个上下堆叠的快捷按钮
+- 文档补充余额卡片章节与安全模型说明
+
+### 0.1.0
+
+- 首个版本：主题定制（背景图 / 楷体 / 深蓝主色 / 半透明磨砂）、「背景设置」标签、Q 版桌宠、任务完成提醒（页签 / 系统通知 / Python 桌面宠物三级通道）
 
 ## License
 
