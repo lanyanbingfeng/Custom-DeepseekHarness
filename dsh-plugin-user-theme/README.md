@@ -116,6 +116,7 @@ agent/status 事件 ──► Node 插件（耗时统计 + 阈值过滤 + 子代
 - **可见性上报**：每个页签以唯一 clientId 经 `POST /pet-visibility` 上报（visibilitychange + 20s 心跳 + pagehide sendBeacon），Node 端 60 秒未上报自动剔除
 - **配置**：`GET/POST /pet-config` 持久化到 `~/.dsh/user-theme-pet-notify.json`（不污染插件目录）；提醒总开关/阈值/桌面宠物三项由服务端权威存储、多页签共享；提示音/系统通知为每浏览器本地偏好
 - **Python 桌宠托管**：`desktopPetEnabled` 时 Node 端 `spawn`（detached + windowsHide）拉起 `desktop_pet.py`（tkinter 透明置顶窗，纯标准库，提示音为 winsound 播放内存生成的 wav）；启动失败仅记日志、不影响浏览器功能；插件 dispose 时回收进程
+- **桌宠渲染（纯标准库）**：素材原始帧高 320px，显示区仅约 128px——有 Pillow 时 LANCZOS 缩放并预合成 alpha 到色键色；无 Pillow 时用 Tk PhotoImage 自带的 `zoom()/subsample()` 做整数有理逼近等比缩放（当前帧精确 2/5，误差 0），**绝不原图直读**（早期版本在此环境下会把头顶、脚、两侧头发裁掉 60%）。Label 宽度按缩放后最宽帧（jump/wave 比 idle 宽）自适应；进程启动即声明 Per-Monitor V2 DPI 感知（旧系统回退 shcore API），150% 缩放下按物理像素 1:1 渲染，不被 Windows 位图拉伸发虚
 - **单实例保证**：桌宠是 detached 独立进程（DSH 关掉后仍要显示提醒），父进程退出后它会留存，因此启动前会先清理历史遗留的桌宠进程——只匹配命令行含本插件 `desktop_pet.py` 路径的 python，不误伤其它 python；停止时用 `taskkill /T /F` 结束整棵进程树（Windows 上 `python` 常先起一个 shim 再拉起真实解释器，只杀直接子进程会留下孤儿）。清理与启动串行化，不会出现「清理迟到杀掉新桌宠」的竞态
 - **独立运行**：`python desktop_pet.py --sse http://127.0.0.1:3080/plugins/dsh-plugin-user-theme/pet-events --assets <插件目录>/assets/pet`
 - **系统通知授权**：在「背景设置 → 任务完成提醒」里打开「系统通知」开关时会触发浏览器授权请求
@@ -130,7 +131,7 @@ dsh-plugin-user-theme/
 │   └── index.js           # Node 端入口：注入 CSS + 壁纸/桌宠帧 base64；agent/status 耗时检测、pet-events(SSE)/pet-visibility/pet-config 路由、Python 桌宠托管、balance 余额查询代理
 ├── lib/
 │   └── client.js          # Client 端 bundle：注册「背景设置」section + 桌宠逻辑 + 任务完成提醒（SSE 消费/可见性上报/提示音/系统通知）+ 侧边栏余额卡片与快捷入口
-├── desktop_pet.py         # 独立桌面宠物：tkinter 置顶透明窗，SSE 订阅完成事件，跳跃+气泡+提示音
+├── desktop_pet.py         # 独立桌面宠物：tkinter 置顶透明窗（Per-Monitor DPI 感知），SSE 订阅完成事件，帧等比缩放（Pillow / 纯 Tk 双通道），跳跃+气泡+提示音
 ├── assets/
 │   ├── bg.jpg             # 默认背景图
 │   └── pet/               # 桌宠动作帧（透明背景 PNG，高 320px）
@@ -149,7 +150,7 @@ dsh-plugin-user-theme/
 
 ## 换桌宠帧
 
-替换 `assets/pet/` 下对应 PNG 即可（保持透明背景、高度约 320px 效果最佳）；缺帧时自动回退 `idle.png`，重启 DSH 后生效。
+替换 `assets/pet/` 下对应 PNG 即可（透明背景、高度约 320px 效果最佳）。各帧高度保持一致即可，**宽度允许不同**（如挥手/跳跃帧更宽）：脚本按统一高度等比缩放，显示宽度自动取最宽帧，窄帧水平居中。缺帧时自动回退 `idle.png`，重启 DSH 后生效。
 
 ## DeepSeek API 余额卡片
 
@@ -206,9 +207,16 @@ dsh-plugin-user-theme/
 - Node.js ≥ 18
 - 基于 DSH 公开 API：`webServer.tapIndex` + `webServer.register` + `settings.section` slot + `sidebar.footer.action` slot + `agent/status` 事件 + `credentials` 凭据服务
 - 余额查询需要已配置 DeepSeek API Key（DSH 模型设置页保存，或导出 `DEEPSEEK_API_KEY`）
-- 独立桌面宠物（可选）：Python 3（标准库 tkinter，Windows 自带 winsound）；缺失时仅浏览器内提醒可用。系统 Python 若不带 tkinter，可用环境变量 `DSH_PET_PYTHON` 指定其它解释器
+- 独立桌面宠物（可选）：Python 3 + tkinter（Tk 8.6，Windows 自带 winsound），**纯标准库即可完整运行**：未安装 Pillow 时自动改用 Tk PhotoImage 的 `zoom/subsample` 等比缩放；装有 Pillow 时获得 LANCZOS 高质量缩放与 alpha 预合成。缺 tkinter 时仅浏览器内提醒可用；系统 Python 若不带 tkinter，可用环境变量 `DSH_PET_PYTHON` 指定其它解释器
+- 高 DPI 屏：桌宠进程声明 Per-Monitor V2 感知（Win10 1703+），旧系统回退 `SetProcessDpiAwareness`，均不支持时退回系统位图拉伸
 
 ## 更新日志
+
+### 0.2.2
+
+- **修复**：Python 桌宠在运行环境未安装 Pillow 时（本机实际由 uv 管理的纯标准库 Python 托管），动作帧按原始尺寸 200×320 直接塞进 128px 的 Label，头顶、脚、两侧长发被裁掉约 60%。现在无 Pillow 时改用 Tk PhotoImage 自带的 `zoom()/subsample()` 整数有理逼近等比缩放到目标高度（当前素材精确 2/5，误差 0），纯标准库即可完整显示
+- **修复**：Label 宽度从写死的 128px 改为按缩放后最宽帧（jump/wave 比 idle 宽）自适应，宽动作帧不再被左右裁切；窗口宽度同步以最宽帧为下限
+- **改进**：桌宠进程启动即声明 Per-Monitor V2 DPI 感知（旧系统回退 shcore API），高 DPI 屏（如 150% 缩放）按物理像素 1:1 渲染，不再被 Windows 位图拉伸导致整体发虚
 
 ### 0.2.1
 

@@ -26,7 +26,7 @@ dsh-plugin-user-theme/
 ├── cordis.patch.yml        # 挂载入口（insert user-theme）
 ├── src/index.js            # Node 端：注入 CSS + 壁纸/桌宠帧 base64；agent/status 耗时检测 + SSE 路由 + Python 桌宠托管 + /balance 余额查询代理
 ├── lib/client.js           # Client 端：settings.section slot 注册「背景设置」+ 桌宠 + 任务完成提醒 + sidebar.footer.action 余额卡片
-├── desktop_pet.py          # 独立桌面宠物：tkinter 置顶透明窗，SSE 订阅完成事件，跳跃+气泡+提示音
+├── desktop_pet.py          # 独立桌面宠物：tkinter 置顶透明窗（Per-Monitor DPI 感知、帧等比缩放，纯标准库可跑），SSE 订阅完成事件，跳跃+气泡+提示音
 ├── assets/bg.jpg           # 默认背景图
 ├── assets/pet/             # 桌宠动作帧（idle/blink/wave/wink/jump，透明 PNG）
 ├── README.md

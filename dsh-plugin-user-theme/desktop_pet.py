@@ -20,6 +20,7 @@
 """
 
 import argparse
+import ctypes
 import http.client
 import io
 import json
@@ -34,9 +35,19 @@ import tkinter as tk
 import tkinter.font as tkfont
 from urllib.parse import urlparse
 
+# 进程启动后第一时间声明 Per-Monitor V2 DPI 感知：
+# 默认 DPI-unaware 时 Windows 会把整个窗口位图按系统缩放（本机 150%）
+# 拉伸，桌宠与文字都会发虚；声明后 Tk 的几何单位即物理像素，1:1 清晰渲染。
+# 必须在创建任何 Tk 窗口之前调用，失败则静默退回系统默认行为。
 try:
-    import ctypes
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except (AttributeError, OSError):
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        pass
 
+try:
     _user32 = ctypes.windll.user32
     _kernel32 = ctypes.windll.kernel32
     # 64 位下 HWND 是 64 位指针，必须显式声明参数类型，否则 ctypes 默认按
@@ -72,7 +83,8 @@ BUBBLE_TEXT_DONE = "主人，你的任务完成了哦"
 BUBBLE_TEXT_QUESTION = "主人，有一些问题需要你来定夺"
 # 弹窗不再自动消失：只有用户点击弹窗（气泡或桌宠）才收起
 WINDOW_H = 220
-PET_SIZE = 128  # 桌宠显示高度（px）
+PET_SIZE = 128  # 桌宠显示高度（px）；宽度按各帧等比缩放后的最大宽度自适应
+PET_ZOOM_MAX = 10  # 无 Pillow 时 Tk 整数缩放允许的最大放大倍数
 CHROMA = "#010101"  # 透明色键：此颜色区域完全透明
 # 距底边距加大到 80px，确保避开 Windows 任务栏（默认 40px）及可能的系统 UI
 MARGIN_BOTTOM = 80
@@ -243,6 +255,9 @@ class DesktopPet:
             pass
         self.root.configure(bg=CHROMA)
 
+        # pet_w 必须先有默认值：_load_frames 加载失败返回 None 时也要保证
+        # 后续 _window_width_for / _relayout 能拿到合法的桌宠宽度。
+        self.pet_w = PET_SIZE
         self.frames = self._load_frames(assets_dir)
 
         # 字体对象（用于精确测量文字宽度，气泡自适应文案）
@@ -259,7 +274,7 @@ class DesktopPet:
         )
         self._draw_bubble(BUBBLE_TEXT_DONE)
 
-        # 桌宠画面
+        # 桌宠画面：尺寸在 show() 时按最宽帧重设，避免宽帧（jump/wave）被裁切
         self.pet = tk.Label(self.root, bg=CHROMA, bd=0)
         if self.frames:
             self.pet.configure(image=self.frames["idle"])
@@ -280,8 +295,8 @@ class DesktopPet:
         return text_w + BUBBLE_PAD_X * 2
 
     def _window_width_for(self, bubble_w):
-        """窗口宽度 = 气泡宽度 + 左右留白，且不小于桌宠宽度。"""
-        return max(bubble_w + WINDOW_PAD_X, PET_SIZE + WINDOW_PAD_X)
+        """窗口宽度 = 气泡宽度 + 左右留白，且不小于桌宠（含最宽帧）宽度。"""
+        return max(bubble_w + WINDOW_PAD_X, self.pet_w + WINDOW_PAD_X)
 
     def _draw_bubble(self, text):
         """在 Canvas 上画圆角气泡：圆角矩形 + 指向桌宠的尾巴 + 文字。"""
@@ -312,12 +327,35 @@ class DesktopPet:
             fill=BUBBLE_TEXT_COLOR, font=self._font,
         )
 
+    @staticmethod
+    def _best_rational(ratio):
+        """用 zoom/subsample 的整数对 (z, s) 近似目标缩放比 ratio。
+
+        Tk PhotoImage 只支持整数倍 zoom（放大）/subsample（抽稀），
+        在 1..PET_ZOOM_MAX 范围内枚举放大倍数，挑相对误差最小的组合，
+        误差相同时取放大倍数更小的（中间图像素更少、更省内存）。
+        """
+        best = (1, 1)
+        best_err = float("inf")
+        for z in range(1, PET_ZOOM_MAX + 1):
+            s = max(1, round(z / ratio))
+            err = abs((z / s) - ratio) / ratio
+            if err < best_err - 1e-9:
+                best_err = err
+                best = (z, s)
+        return best
+
     def _load_frames(self, assets_dir):
-        """加载桌宠帧。
+        """加载桌宠帧，并把缩放后最大帧宽记录到 self.pet_w。
 
         有 Pillow：缩放到 PET_SIZE 高度（LANCZOS 高质量）并把 alpha
-        预合成到色键色上，彻底规避 tkinter 直接显示 PNG 的白底问题。
-        无 Pillow：退回 tk.PhotoImage 原图直读（可能有白底，仅兜底）。
+        预合成到色键色上，彻底规避 tkinter 直接显示 PNG 时的白底问题。
+        无 Pillow：用 Tk PhotoImage 自带的 zoom/subsample 整数缩放等比
+        缩到 PET_SIZE 高度——绝不能原图直读：素材原始高度 320px，而
+        Label 只有约 128px 高，原图直读会导致头顶/脚/左右被严重裁切。
+        Tk 8.6 原生支持 PNG 的 alpha 通道，透明区域显示为色键透明。
+
+        返回帧字典（无 idle 帧时为 None）。
         """
         frames = {}
         if HAS_PIL:
@@ -340,13 +378,20 @@ class DesktopPet:
             for name in PET_FRAMES:
                 path = os.path.join(assets_dir, name + ".png")
                 try:
-                    frames[name] = tk.PhotoImage(file=path)
+                    src = tk.PhotoImage(file=path)
+                    if src.height() > 0:
+                        z, s = self._best_rational(PET_SIZE / src.height())
+                        if (z, s) != (1, 1):
+                            src = src.zoom(z, z).subsample(s, s)
+                    frames[name] = src
                 except Exception:
                     pass
         if not frames.get("idle"):
             return None
         for name in PET_FRAMES:
             frames.setdefault(name, frames["idle"])
+        # Label 宽度必须容下最宽的帧（jump/wave 比 idle 宽），否则两侧被裁
+        self.pet_w = max(PET_SIZE, max(f.width() for f in frames.values()))
         return frames
 
     def show(self, text=BUBBLE_TEXT_DONE):
@@ -383,9 +428,10 @@ class DesktopPet:
         bubble_x = (window_w - bubble_w) // 2
         self.bubble.place(x=bubble_x, y=4, width=bubble_w, height=BUBBLE_H)
         self._pet_base_y = WINDOW_H - PET_SIZE - 10
+        # Label 宽度取最宽帧宽度：图片在 Label 内水平居中，窄帧两侧是色键透明
         self.pet.place(
-            x=(window_w - PET_SIZE) // 2, y=self._pet_base_y,
-            width=PET_SIZE, height=PET_SIZE,
+            x=(window_w - self.pet_w) // 2, y=self._pet_base_y,
+            width=self.pet_w, height=PET_SIZE,
         )
 
     def hide(self):
