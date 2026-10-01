@@ -1,0 +1,58 @@
+{
+  "name": "dsh-plugin-user-theme",
+  "version": "0.4.0",
+  "description": "DSH 定制主题插件：背景图 + 楷体 + 深蓝主色 + 半透明磨砂，内置原生「背景设置」标签（settings.section slot）；侧边栏 DeepSeek 余额卡片（读取账号登录态，无需 API Key）+ 用量明细/在线对话快捷入口。可在 DSH 桌面端的「插件 → 添加插件」里直接安装。",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "assets",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "desktop",
+    "theme",
+    "user-theme",
+    "custom-ui"
+  ],
+  "author": {
+    "name": "ZhuanZ"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  }
+}

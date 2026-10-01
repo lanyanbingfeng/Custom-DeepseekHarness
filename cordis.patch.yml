@@ -1,0 +1,14 @@
+# dsh-plugin-user-theme 入口：单条 insert，把 src/index.js 作为 user-theme 插件挂载。
+#
+# 本文件由 `dsh.bundle.patch` 声明，插件市场（桌面端「插件 → 添加插件」）安装后
+# 会把它作为组合包的一层应用；`name` 相对本包根目录解析。
+#
+# Node 端职责：
+#   - 通过 `webserver/index-inject` 贡献结构化注入行（样式 / 资源地址 / preload），
+#     这是桌面端与 Web 端都生效的通道（`webServer.tapIndex` 在桌面端不会执行）；
+#   - 提供 /plugins/dsh-plugin-user-theme/assets/* 静态资源路由（壁纸与桌宠动作帧）；
+#   - 任务完成提醒 SSE 路由 + Python 桌面宠物托管 + /balance 余额查询代理。
+
+- insert:
+    - id: user-theme
+      name: ./src/index.js

@@ -1,43 +1,114 @@
-// DSH 定制主题插件入口（Node 端）
+// DSH 定制主题插件入口（Host / Node 端）
 //
-// 职责：
-//   1. 通过 webServer.tapIndex() 注入主题 CSS（背景图 + 楷体 + 深蓝主色 + 各层半透明）
-//      以及"背景设置"section 的内容样式；
-//   2. 注入 window.__USER_THEME_ASSETS__ 变量，携带默认壁纸的 base64，
-//      供浏览器端 client bundle（lib/client.js）的 React 组件读取。
+// 桌面端（DeepSeek Harness 桌面应用）与 Web 端共用同一份插件：
+//   1. 通过 `webserver/index-inject` 事件贡献**结构化注入行**（style / global / html）。
+//      这是桌面端唯一有效的注入通道——桌面窗口加载的是打包好的静态 index.html，
+//      `webServer.tapIndex()` 只有 Web 端 fallback 渲染 index 时才会执行。
+//   2. 通过 `webServer.register()` 暴露插件自己的静态资源路由（壁纸 / 桌宠动作帧），
+//      客户端按需拉取；桌面外壳会把 `dsh-app://app/plugins/...` 转发给 Host。
 //
-// "背景设置"本身作为 DSH 设置面板的第 5 个原生标签，由 lib/client.js 通过
-// 官方 `settings.section` slot 注册，走 React 原生渲染通道，不做任何 DOM hack。
+// 「背景设置」标签、侧边栏余额卡片由 lib/client.js 注册到官方 slot，
+// 桌面宠物（可选）是独立的 Python 进程，由 Node 端托管。
+//
+// 运行期无第三方依赖：仅用 Node 内置模块。
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const BG_PATH = join(__dirname, "..", "assets", "bg.jpg");
-const PET_DIR = join(__dirname, "..", "assets", "pet");
-const PET_SCRIPT = join(__dirname, "..", "desktop_pet.py");
+const PLUGIN_ROOT = resolve(__dirname, "..");
+const ASSET_DIR = join(PLUGIN_ROOT, "assets");
+const PET_DIR = join(ASSET_DIR, "pet");
+const PET_SCRIPT = join(PLUGIN_ROOT, "desktop_pet.py");
 const PET_FRAMES = ["idle", "blink", "wave", "wink", "jump"];
 
-// 读取桌宠动作帧（assets/pet/*.png）转 base64。
-// 文件缺失时优雅降级：其余帧回退 idle；连 idle 都没有则返回 null（前端不渲染桌宠）。
-function readPetFrames() {
-  const frames = {};
-  for (const name of PET_FRAMES) {
-    try {
-      const b64 = readFileSync(join(PET_DIR, name + ".png")).toString("base64");
-      frames[name] = `data:image/png;base64,${b64}`;
-    } catch {
-      /* 单帧缺失，后面统一回退 */
-    }
+/** 插件自己的路由前缀（同时是 dsh-client-modules 之外的命名空间，不会冲突）。 */
+const PLUGIN_ROUTE_PREFIX = "/plugins/dsh-plugin-user-theme";
+
+/* ===== 静态资源路由 =====
+ *
+ * 桌面端把 `dsh-app://app/plugins/**` 转发给 Host，因此浏览器侧可以直接按
+ * 文档相对地址取图（`plugins/...`），不必把 base64 塞进 index。
+ * 白名单式路由：只有下列文件可被取到，且解析后必须仍在 assets/ 内。
+ */
+const ASSET_CONTENT_TYPES = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+};
+const ASSETS = {
+  "bg.jpg": join(ASSET_DIR, "bg.jpg"),
+  ...Object.fromEntries(PET_FRAMES.map((name) => [`pet/${name}.png`, join(PET_DIR, `${name}.png`)])),
+};
+const ASSET_NAMES = Object.keys(ASSETS);
+
+/**
+ * 读取资源文件的版本号（mtime+size），用于 cache-busting 查询串。
+ * 资源在插件安装后即固定；改了文件会换 URL，避免浏览器拿到旧图。
+ * @param {string} file - 资源绝对路径
+ * @returns {string} 版本串；文件缺失时为空串（路由会回 404）
+ */
+function assetVersion(file) {
+  try {
+    const st = statSync(file);
+    return `${Math.round(st.mtimeMs)}-${st.size}`;
+  } catch {
+    return "";
   }
-  if (!frames.idle) return null;
-  for (const name of PET_FRAMES) {
-    if (!frames[name]) frames[name] = frames.idle;
+}
+
+/** 资源在浏览器里的文档相对地址（桌面端由外壳转发给 Host）。 */
+function assetUrl(name, version) {
+  return `${PLUGIN_ROUTE_PREFIX.replace(/^\//, "")}/assets/${name}${version ? `?v=${version}` : ""}`;
+}
+
+/**
+ * 注册插件静态资源路由。
+ * @param {object} webServer - webServer 服务
+ * @returns {Array<() => void>} disposer 列表
+ */
+function registerAssetRoutes(webServer) {
+  const disposers = [];
+  for (const name of ASSET_NAMES) {
+    const file = ASSETS[name];
+    const type = ASSET_CONTENT_TYPES[name.slice(name.lastIndexOf("."))] || "application/octet-stream";
+    disposers.push(
+      webServer.register({
+        kind: "exact",
+        path: `${PLUGIN_ROUTE_PREFIX}/assets/${name}`,
+        handler: (req, res) => {
+          // 白名单 + 目录约束：即使有人改了 ASSETS 也不会读出插件目录之外的文件
+          if (!resolve(file).startsWith(resolve(ASSET_DIR) + sep)) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          let body;
+          try {
+            body = readFileSync(file);
+          } catch {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          res.writeHead(200, {
+            "Content-Type": type,
+            "Content-Length": body.length,
+            // 带版本查询串 → 可以长缓存；不带版本则短缓存，避免换图后不刷新
+            "Cache-Control": /[?&]v=/.test(req.url || "") ? "public, max-age=31536000, immutable" : "no-cache",
+          });
+          if (req.method === "HEAD") res.end();
+          else res.end(body);
+        },
+      })
+    );
   }
-  return frames;
+  return disposers;
 }
 
 /* ===== 任务完成提醒（pet notify） =====
@@ -45,12 +116,11 @@ function readPetFrames() {
  * Node 端作为唯一事件源：
  *   1. 监听 agent/status，记录每个 agent 的 idle→running→idle 周期耗时；
  *   2. 耗时超过阈值且非子代理会话时，向所有 SSE 订阅者广播完成事件；
- *   3. 提供 pet-events(SSE) / pet-visibility / pet-config 三条路由；
+ *   3. 提供 pet-events(SSE) / pet-visibility / pet-config / pet-test 路由；
  *   4. desktopPetEnabled 时托管独立 Python 桌面宠物进程。
  */
 const NOTIFY_CONFIG_PATH = join(homedir(), ".dsh", "user-theme-pet-notify.json");
 const NOTIFY_DEFAULTS = { notifyEnabled: true, minDurationSec: 30, desktopPetEnabled: true };
-const PET_ROUTE_PREFIX = "/plugins/dsh-plugin-user-theme";
 const VISIBILITY_TTL_MS = 60_000;
 const SSE_HEARTBEAT_MS = 25_000;
 
@@ -132,8 +202,14 @@ function setupNotify(ctx) {
   };
 
   // --- agent/status 耗时统计（子代理会话跳过） ---
-  ctx.on("agent/status", ({ agent, status }) => {
+  //
+  // 事件是 agent 作用域的：`this` 是 Scoped<Agent>，payload 里同时带 agent 字段。
+  // 两种形态都兼容（旧版本只给 payload.agent）。
+  ctx.on("agent/status", function (payload) {
     try {
+      const agent = payload?.agent ?? this;
+      const status = payload?.status;
+      if (!agent || typeof agent.id !== "string") return;
       if (status === "running") {
         runningSince.set(agent.id, Date.now());
         return;
@@ -152,14 +228,19 @@ function setupNotify(ctx) {
       /* 单个事件异常不影响宿主 */
     }
   });
-  ctx.on("agent/disposed", ({ agent }) => {
-    runningSince.delete(agent.id);
+  ctx.on("agent/disposed", function (payload) {
+    try {
+      const agent = payload?.agent ?? this;
+      if (agent && typeof agent.id === "string") runningSince.delete(agent.id);
+    } catch {
+      /* 忽略 */
+    }
   });
 
   // --- 提问检测：agent 调用 ask_user_question 工具即"向用户提问" ---
   ctx.on("tools/execute", (exec, next) => {
     try {
-      if (exec.name === "ask_user_question" && config.notifyEnabled) {
+      if (exec?.name === "ask_user_question" && config.notifyEnabled) {
         broadcast({ type: "question", pageVisible: pageVisible(), at: Date.now() });
       }
     } catch {
@@ -174,7 +255,7 @@ function setupNotify(ctx) {
   disposers.push(
     webServer.register({
       kind: "exact",
-      path: `${PET_ROUTE_PREFIX}/pet-events`,
+      path: `${PLUGIN_ROUTE_PREFIX}/pet-events`,
       handler: (req, res) => {
         let clientId = null;
         try {
@@ -214,7 +295,7 @@ function setupNotify(ctx) {
   disposers.push(
     webServer.register({
       kind: "exact",
-      path: `${PET_ROUTE_PREFIX}/pet-visibility`,
+      path: `${PLUGIN_ROUTE_PREFIX}/pet-visibility`,
       handler: async (req, res) => {
         const body = await readJsonBody(req);
         if (typeof body.clientId === "string" && body.clientId) {
@@ -230,7 +311,7 @@ function setupNotify(ctx) {
   disposers.push(
     webServer.register({
       kind: "exact",
-      path: `${PET_ROUTE_PREFIX}/pet-config`,
+      path: `${PLUGIN_ROUTE_PREFIX}/pet-config`,
       handler: async (req, res) => {
         if (req.method === "POST") {
           const body = await readJsonBody(req);
@@ -260,7 +341,7 @@ function setupNotify(ctx) {
   disposers.push(
     webServer.register({
       kind: "exact",
-      path: `${PET_ROUTE_PREFIX}/pet-test`,
+      path: `${PLUGIN_ROUTE_PREFIX}/pet-test`,
       handler: (req, res) => {
         const url = new URL(req.url, "http://localhost");
         const evType = url.searchParams.get("type") === "question" ? "question" : "done";
@@ -290,7 +371,7 @@ function setupNotify(ctx) {
   // --- Python 桌面宠物进程托管 ---
   //
   // 桌宠是 detached + unref 的独立进程（DSH 关掉后仍要显示提醒），因此父进程退出时它会留存。
-  // 若不在启动前清理，每次 dsh web 重启都会多留一个桌宠窗口、越积越多；另外在 Windows 上
+  // 若不在启动前清理，每次重启都会多留一个桌宠窗口、越积越多；另外在 Windows 上
   // `python` 常常是先启动一个 shim（如 .local\bin\python.exe）再拉起真实解释器，只 kill 直接
   // 子进程会留下孤儿的真实解释器。因此这里两处加固：启动前清遗留 + 停止时结束整棵进程树。
   /**
@@ -348,7 +429,7 @@ function setupNotify(ctx) {
       if (!petWanted || petProc) return; // 清理期间已被关闭
       const python = process.env.DSH_PET_PYTHON || "python";
       const host = webServer.host === "0.0.0.0" ? "127.0.0.1" : webServer.host;
-      const sseUrl = `http://${host}:${webServer.port}${PET_ROUTE_PREFIX}/pet-events`;
+      const sseUrl = `http://${host}:${webServer.port}${PLUGIN_ROUTE_PREFIX}/pet-events`;
       const proc = spawn(python, [PET_SCRIPT, "--sse", sseUrl, "--assets", PET_DIR], {
         detached: true,
         stdio: "ignore",
@@ -357,18 +438,18 @@ function setupNotify(ctx) {
       petProc = proc;
       proc.on("error", (err) => {
         if (petProc === proc) petProc = null;
-        console.warn(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
+        ctx.logger?.warn?.(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
       });
       proc.on("exit", (code, signal) => {
         const unexpected = petProc === proc; // 主动 stop 时 petProc 已置空，不重复报警
         if (unexpected) petProc = null;
         if (unexpected && code !== 0) {
-          console.warn(`[user-theme] 桌面宠物进程异常退出（code=${code} signal=${signal}），浏览器内提醒不受影响`);
+          ctx.logger?.warn?.(`[user-theme] 桌面宠物进程异常退出（code=${code} signal=${signal}），浏览器内提醒不受影响`);
         }
       });
       proc.unref();
     } catch (err) {
-      console.warn(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
+      ctx.logger?.warn?.(`[user-theme] 桌面宠物启动失败（浏览器内提醒不受影响）：${err.message}`);
     } finally {
       petStarting = false;
     }
@@ -416,58 +497,99 @@ function setupNotify(ctx) {
   });
 }
 
-/* ===== DeepSeek API 余额查询（Node 端代理，浏览器不接触 API Key） =====
+/* ===== DeepSeek 余额查询（走 DSH 的 DeepSeek 账号，不再使用 API Key） =====
  *
- * 1. 经 harness 的 credentials seam 解析 DEEPSEEK_API_KEY（与聊天请求走同一凭据通道）；
- * 2. 服务端请求 {baseURL}/user/balance（默认 https://api.deepseek.com），解析 balance_infos[0]；
- * 3. 结果在内存中短时缓存（默认 60s），合并并发请求，避免频繁调用余额接口。
- * 可选配置文件 ~/.dsh/user-theme-balance.json：{ "baseURL": "...", "cacheTtlSec": 60 }
+ * 数据来源是 harness 的 `deepseekAccount` 服务（与设置面板「账号」页同一套登录态）：
+ *   - `getBalance(client)` 返回 `{ status, value, bonusWallets }`，或 **null 表示未登录**；
+ *   - `client` 需要 `{ version, locale, timezoneOffsetSeconds }`，与浏览器端调用同形；
+ *   - 凭据只在 Host 内解析，浏览器不接触任何 token。
+ *
+ * 结果在内存中短时缓存（默认 60s）并合并并发请求；同一币种的余额与赠送额度
+ * （bonusWallets 里同币种的钱包）会合并成一条，便于卡片一眼看清。
  */
-const BALANCE_CONFIG_PATH = join(homedir(), ".dsh", "user-theme-balance.json");
-const BALANCE_DEFAULTS = {
-  baseURL: process.env.DSH_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
-  cacheTtlSec: 60,
-};
-const BALANCE_ROUTE = `${PET_ROUTE_PREFIX}/balance`;
-const BALANCE_TIMEOUT_MS = 8000;
 
-function loadBalanceConfig() {
+/** 未登录账号时的固定返回，客户端据此提示去登录。 */
+const NO_ACCOUNT = {
+  ok: false,
+  code: "NO_ACCOUNT",
+  message: "未登录 DeepSeek 账号（请在「设置 → 账号」中登录）",
+};
+
+const BALANCE_ROUTE = `${PLUGIN_ROUTE_PREFIX}/balance`;
+const BALANCE_CACHE_TTL_MS = 60_000;
+/** 进程启动时读一次，失败不缓存，下次请求重试。 */
+let pluginVersionCache = null;
+
+function pluginVersion() {
+  if (pluginVersionCache) return pluginVersionCache;
   try {
-    const saved = JSON.parse(readFileSync(BALANCE_CONFIG_PATH, "utf8"));
-    return { ...BALANCE_DEFAULTS, ...saved };
+    const manifest = JSON.parse(readFileSync(join(PLUGIN_ROOT, "package.json"), "utf8"));
+    pluginVersionCache = typeof manifest.version === "string" ? manifest.version : "0.0.0";
   } catch {
-    return { ...BALANCE_DEFAULTS };
+    pluginVersionCache = "0.0.0";
+  }
+  return pluginVersionCache;
+}
+
+/** 当前 UI 语言（BCP-47；Platform 会自己归一成 zh_CN / en_US）。 */
+function currentLocale() {
+  const explicit = process.env.DSH_LOCALE || process.env.LC_ALL || process.env.LANG;
+  if (explicit && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]+)*$/.test(explicit)) return explicit;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || "zh-CN";
+  } catch {
+    return "zh-CN";
   }
 }
 
-async function fetchDeepSeekBalance(baseURL, apiKey) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), BALANCE_TIMEOUT_MS);
-  try {
-    const resp = await fetch(`${baseURL.replace(/\/+$/, "")}/user/balance`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-      signal: ctrl.signal,
-    });
-    const text = await resp.text();
-    let body = null;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      /* 非 JSON 错误页 */
-    }
-    if (!resp.ok) {
-      const err = new Error(body?.error?.message || `HTTP ${resp.status}`);
-      err.status = resp.status;
-      throw err;
-    }
-    return body;
-  } finally {
-    clearTimeout(timer);
+/**
+ * 把 `deepseekAccount.getBalance()` 的返回值归一成卡片用的形状。
+ * @param {{status: string, value?: Array<{currency: string, balance: string}>, bonusWallets?: Array<{currency: string, balance: string}>}} result
+ * @returns {object} 卡片数据
+ */
+function normalizeAccountBalance(result) {
+  const main = Array.isArray(result?.value) ? result.value : [];
+  const bonus = Array.isArray(result?.bonusWallets) ? result.bonusWallets : [];
+  const wallets = [...main, ...bonus];
+  if (wallets.length === 0) {
+    return { ok: false, code: "NO_WALLET", message: "账号未返回任何钱包余额", at: Date.now() };
   }
+
+  // 按币种合并（赠送额度单独记一份，卡片可以显示「含赠送」）
+  const byCurrency = new Map();
+  for (const wallet of wallets) {
+    const currency = wallet?.currency || "CNY";
+    const amount = Number(wallet?.balance);
+    if (!Number.isFinite(amount)) continue;
+    const entry = byCurrency.get(currency) || { currency, total: 0, bonus: 0 };
+    entry.total += amount;
+    byCurrency.set(currency, entry);
+  }
+  for (const wallet of bonus) {
+    const currency = wallet?.currency || "CNY";
+    const amount = Number(wallet?.balance);
+    if (!Number.isFinite(amount)) continue;
+    const entry = byCurrency.get(currency);
+    if (entry) entry.bonus += amount;
+  }
+  if (byCurrency.size === 0) {
+    return { ok: false, code: "NO_WALLET", message: "账号未返回任何钱包余额", at: Date.now() };
+  }
+
+  // 以 CNY 为主（DeepSeek 平台默认币种），否则取第一项
+  const primary = byCurrency.get("CNY") || [...byCurrency.values()][0];
+  return {
+    ok: result?.status === "ready",
+    source: "account",
+    balance: Number(primary.total.toFixed(2)),
+    bonus: primary.bonus > 0 ? Number(primary.bonus.toFixed(2)) : null,
+    currency: primary.currency,
+    wallets: [...byCurrency.values()].map((w) => ({
+      currency: w.currency,
+      balance: Number(w.total.toFixed(2)),
+    })),
+    at: Date.now(),
+  };
 }
 
 function setupBalance(ctx) {
@@ -487,10 +609,9 @@ function setupBalance(ctx) {
       try {
         const url = new URL(req.url, "http://localhost");
         const force = url.searchParams.get("refresh") === "1";
-        const cfg = loadBalanceConfig();
         const now = Date.now();
 
-        if (!force && cache?.data && now - cache.at < cfg.cacheTtlSec * 1000) {
+        if (!force && cache?.data && now - cache.at < BALANCE_CACHE_TTL_MS) {
           sendJson(res, 200, { ...cache.data, cached: true });
           return;
         }
@@ -500,39 +621,27 @@ function setupBalance(ctx) {
           return;
         }
 
-        // 凭据：优先 credentials seam（Models 页写入/refs），回退启动环境变量
-        let apiKey;
-        const credentials = typeof ctx.get === "function" ? ctx.get("credentials") : undefined;
-        if (credentials) {
-          const hit = await credentials.resolve("DEEPSEEK_API_KEY");
-          apiKey = hit?.value;
-        }
-        if (!apiKey) apiKey = process.env.DEEPSEEK_API_KEY;
-        if (!apiKey) {
+        const account = typeof ctx.get === "function" ? ctx.get("deepseekAccount") : undefined;
+        if (!account || typeof account.getBalance !== "function") {
           sendJson(res, 200, {
             ok: false,
-            code: "NO_API_KEY",
-            message: "未配置 DEEPSEEK_API_KEY（请在 DSH 模型设置中保存 DeepSeek API Key）",
+            code: "NO_ACCOUNT_SERVICE",
+            message: "当前组合没有 DeepSeek 账号服务（本插件需要桌面端 / 完整 Web 组合）",
           });
           return;
         }
 
-        const pending = fetchDeepSeekBalance(cfg.baseURL, apiKey)
-          .then((body) => {
-            // 线上接口字段为 balance_infos 数组（每币种一项，通常只有 CNY）；
-            // 兼容历史/网关上可能出现的单数 balance_info 对象。
-            const info = Array.isArray(body?.balance_infos)
-              ? body.balance_infos[0]
-              : body?.balance_info;
-            const data = {
-              ok: body?.is_available === true,
-              available: body?.is_available === true,
-              balance: info ? Number(info.total_balance) : null,
-              granted: info ? Number(info.granted_balance) : null,
-              toppedUp: info ? Number(info.topped_up_balance) : null,
-              currency: info?.currency || "CNY",
-              at: Date.now(),
-            };
+        const client = {
+          version: pluginVersion(),
+          locale: currentLocale(),
+          timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+        };
+
+        const pending = Promise.resolve()
+          .then(() => account.getBalance(client))
+          .then((result) => {
+            // null = 未登录，或查询期间登录态发生变化
+            const data = result == null ? { ...NO_ACCOUNT, at: Date.now() } : normalizeAccountBalance(result);
             cache = { at: Date.now(), pending: null, data };
             return data;
           })
@@ -540,8 +649,7 @@ function setupBalance(ctx) {
             cache = null;
             return {
               ok: false,
-              code: err.status === 401 ? "UNAUTHORIZED" : "FETCH_FAILED",
-              status: err.status,
+              code: "FETCH_FAILED",
               message: err?.message || String(err),
               at: Date.now(),
             };
@@ -558,29 +666,36 @@ function setupBalance(ctx) {
   ctx.on("dispose", () => disposer());
 }
 
-function buildCss() {
-  const buf = readFileSync(BG_PATH);
-  const b64 = buf.toString("base64");
-  const bgUri = `data:image/jpeg;base64,${b64}`;
+/* ===== index 注入：桌面端与 Web 端共用的唯一通道 =====
+ *
+ * 只贡献结构化注入行，不再使用 tapIndex：
+ *   - style  ：主题基础样式（字体、半透明、桌宠、气泡、余额卡片）
+ *   - global ：`__USER_THEME_ASSETS__`（壁纸 / 桌宠帧的文档相对地址 + 公共路由前缀）
+ *   - html   ：壁纸 preload，避免首帧背景闪一下
+ *
+ * 桌面端由外壳在页面启动阶段按序应用这些行（style/global/html 都受支持），
+ * Web 端由 Host 的 fallback 在渲染 index 时应用同一批行。
+ */
+function buildThemeCss() {
+  return `/* ===== DSH 用户主题（dsh-plugin-user-theme） ===== */
 
-  const BASE_CSS = `
-/* ===== DSH 用户主题（dsh-plugin-user-theme） ===== */
-
-/* 字体：楷体 */
+/* 字体：由「背景设置」在运行时把 --ut-font-family 写到 :root */
 :root {
-  --dsw-font-family: "KaiTi", "楷体", "STKaiti", "华文楷体", "Microsoft YaHei", sans-serif !important;
+  --dsw-font-family: var(--ut-font-family, "KaiTi", "楷体", "STKaiti", "华文楷体", "Microsoft YaHei", sans-serif) !important;
+  /* 壁纸地址由 Node 端注入；"none" 表示不铺背景 */
+  --ut-bg-url: none;
 }
 
 /* 背景图：html/body/#root 三层 */
 html, body, #root {
-  background-image: url("${bgUri}") !important;
+  background-image: var(--ut-bg-url) !important;
   background-size: cover !important;
   background-position: center !important;
   background-attachment: fixed !important;
   background-repeat: no-repeat !important;
 }
 
-/* 各层背景半透明 + 主色调 + 面板调实 */
+/* 各层背景半透明 + 主色调 + 面板调实（变量默认值；运行时可被内联样式覆盖） */
 body[data-ds-dark-theme] {
   --dsw-alias-bg-base: rgba(21, 21, 23, 0.45) !important;
   --dsw-alias-bg-layer-1: rgba(35, 35, 36, 0.40) !important;
@@ -588,11 +703,9 @@ body[data-ds-dark-theme] {
   --dsw-alias-bg-layer-3: rgba(53, 54, 56, 0.36) !important;
   --dsw-specific-sidebar-fill: rgba(27, 27, 28, 0.48) !important;
   --dsw-specific-input-major: rgba(44, 44, 46, 0.42) !important;
-  --dsw-specific-bubble: rgba(44, 44, 46, 0.40) !important;
   --dsw-specific-menu: rgba(35, 35, 36, 0.97) !important;
   --dsw-alias-bg-overlay: rgba(44, 44, 46, 0.97) !important;
   --dsw-alias-brand-primary: #6d9ed0 !important;
-  --dsw-alias-state-business-primary: #4a8fd6 !important;
   --dsw-static-deepseek-400: #4a8fd6 !important;
   --dsw-static-deepseek-450: #4a8fd6 !important;
   --dsw-static-deepseek-500: #3b6ea8 !important;
@@ -604,37 +717,27 @@ body[data-ds-dark-theme] [class*="Modal"] {
   background-color: rgba(27, 27, 28, 0.98) !important;
 }
 
-/* 设置面板：DSH 用 --dsw-alias-bg-layer-2 做面板背景，而主题把它调成了半透明，
-   导致面板后的聊天内容透出、视觉叠加。这里单独把设置面板覆盖为不透明，
-   让"设置面板"透明度滑块（--dsw-alias-bg-overlay）真正生效。 */
-body[data-ds-dark-theme] .VOzbGW_panel {
-  background: var(--dsw-alias-bg-overlay, rgba(44, 44, 46, 0.97)) !important;
-}
-body[data-ds-dark-theme] .VOzbGW_content,
-body[data-ds-dark-theme] .VOzbGW_options {
-  background: transparent !important;
+/* 设置面板：面板背景色走 --dsw-alias-bg-overlay，让「设置面板」透明度滑块真正生效。
+   0.2.0 的面板/弹窗容器用 --dsw-alias-bg-layer-2，而主题把它调成了半透明，
+   于是面板后的内容会透出来；这里把面板与弹窗容器指向同一个可变的不透明色。
+   只按构建产物里真实存在的类名（*_dialog_* / *_panel_* / *_modal_*）匹配。 */
+body[data-ds-dark-theme] [class*="_dialog_"],
+body[data-ds-dark-theme] [class*="_panel_"],
+body[data-ds-dark-theme] [class*="_modal_"] {
+  background-color: var(--dsw-alias-bg-overlay, rgba(44, 44, 46, 0.97)) !important;
 }
 
 /* ===== 背景设置 section 内容样式（由 client bundle 的 React 组件渲染） ===== */
-.user-theme-root {
-  color: var(--dsw-alias-label-primary, #e8f0ec);
-  font-family: var(--dsw-font-family);
-}
-.user-theme-root * {
-  font-family: var(--dsw-font-family);
-}
-.user-theme-root .ut-section {
-  margin-bottom: 22px;
-}
+.user-theme-root { color: var(--dsw-alias-label-primary, #e8f0ec); }
+.user-theme-root * { font-family: var(--dsw-font-family); }
+.user-theme-root .ut-section { margin-bottom: 22px; }
 .user-theme-root h3 {
   font-size: 13px;
   font-weight: 600;
   margin: 0 0 10px 0;
   color: var(--dsw-alias-label-secondary, #c4d2ca);
 }
-.user-theme-root .ut-row {
-  margin-bottom: 12px;
-}
+.user-theme-root .ut-row { margin-bottom: 12px; }
 .user-theme-root .ut-label {
   display: flex;
   justify-content: space-between;
@@ -642,9 +745,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
   margin-bottom: 6px;
   color: var(--dsw-alias-label-secondary, #c4d2ca);
 }
-.user-theme-root .ut-value {
-  color: var(--dsw-alias-label-primary, #e8f0ec);
-}
+.user-theme-root .ut-value { color: var(--dsw-alias-label-primary, #e8f0ec); }
 .user-theme-root input[type="range"] {
   width: 100%;
   height: 4px;
@@ -682,9 +783,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
   outline: none;
   width: 100%;
 }
-.user-theme-root .ut-select:focus {
-  border-color: #4a8fd6;
-}
+.user-theme-root .ut-select:focus { border-color: #4a8fd6; }
 .user-theme-root .ut-bg-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -698,12 +797,8 @@ body[data-ds-dark-theme] .VOzbGW_options {
   transition: border 0.15s ease;
   border: 2px solid rgba(255, 255, 255, 0.08);
 }
-.user-theme-root .ut-bg-thumb:hover {
-  border-color: rgba(255, 255, 255, 0.25);
-}
-.user-theme-root .ut-bg-thumb-active {
-  border-color: #4a8fd6;
-}
+.user-theme-root .ut-bg-thumb:hover { border-color: rgba(255, 255, 255, 0.25); }
+.user-theme-root .ut-bg-thumb-active { border-color: #4a8fd6; }
 .user-theme-root .ut-bg-thumb img {
   width: 100%;
   height: 100%;
@@ -735,9 +830,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
   border: 1px solid rgba(255, 255, 255, 0.18);
   color: var(--dsw-alias-label-primary, #e8f0ec);
 }
-.user-theme-root .ut-btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
+.user-theme-root .ut-btn-ghost:hover { background: rgba(255, 255, 255, 0.06); }
 .user-theme-root .ut-upload {
   width: 100%;
   margin-top: 10px;
@@ -775,12 +868,8 @@ body[data-ds-dark-theme] .VOzbGW_options {
   background: #fff;
   transition: transform 0.2s ease;
 }
-.user-theme-root .ut-switch-on {
-  background: #4a8fd6;
-}
-.user-theme-root .ut-switch-on::after {
-  transform: translateX(16px);
-}
+.user-theme-root .ut-switch-on { background: #4a8fd6; }
+.user-theme-root .ut-switch-on::after { transform: translateX(16px); }
 
 /* ===== 桌宠（DesktopPet，由 client bundle 挂载到 body） ===== */
 .user-theme-pet {
@@ -814,9 +903,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
 }
-.user-theme-pet.ut-pop img {
-  animation: ut-pet-pop 0.5s ease;
-}
+.user-theme-pet.ut-pop img { animation: ut-pet-pop 0.5s ease; }
 @keyframes ut-pet-pop {
   0% { transform: scale(1, 1); }
   40% { transform: scale(1.12, 0.88); }
@@ -825,9 +912,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
 }
 
 /* 任务完成庆祝动画（桌宠连跳三下） */
-.user-theme-pet.ut-celebrate img {
-  animation: ut-pet-celebrate 0.6s ease-in-out 3;
-}
+.user-theme-pet.ut-celebrate img { animation: ut-pet-celebrate 0.6s ease-in-out 3; }
 @keyframes ut-pet-celebrate {
   0%, 100% { transform: translateY(0); }
   40% { transform: translateY(-14px); }
@@ -870,7 +955,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
 .user-theme-balance {
   width: 100%;
   box-sizing: border-box;
-  margin: 0;
+  margin: 0 0 8px;
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.10);
@@ -882,9 +967,7 @@ body[data-ds-dark-theme] .VOzbGW_options {
   cursor: default;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.user-theme-balance:hover {
-  border-color: rgba(109, 158, 208, 0.45);
-}
+.user-theme-balance:hover { border-color: rgba(109, 158, 208, 0.45); }
 .ut-bal-head {
   display: flex;
   align-items: center;
@@ -969,7 +1052,6 @@ body[data-ds-dark-theme] .VOzbGW_options {
   100% { background-position: 0 0; }
 }
 /* 卡片主体：左侧金额/时间，右侧两个上下堆叠的小填充按钮 */
-.user-theme-balance { margin: 0 0 8px; }
 .ut-bal-body {
   margin-top: 6px;
   display: flex;
@@ -999,9 +1081,9 @@ body[data-ds-dark-theme] .VOzbGW_options {
   justify-content: center;
   gap: 5px;
   padding: 0 10px;
-  border: 0.5px solid var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.12));
+  border: 0.5px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.12)));
   border-radius: 9px;
-  background: var(--dsw-alias-button-elevated-fill, rgba(255, 255, 255, 0.10));
+  background: var(--dsw-alias-button-elevated-fill, var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.10)));
   color: var(--dsw-alias-label-primary, #e8f0ec);
   font-family: inherit;
   font-size: 12px;
@@ -1031,32 +1113,52 @@ body[data-ds-dark-theme] .VOzbGW_options {
 .user-theme-balance.ut-rail .ut-bal-body { display: none; }
 .user-theme-balance.ut-rail .ut-bal-dot { width: 9px; height: 9px; }
 `;
+}
 
-  const petFrames = readPetFrames();
-  const assetsScript =
-    `<script id="user-theme-assets">window.__USER_THEME_ASSETS__ = { defaultBg: ${JSON.stringify(bgUri)}, pet: ${JSON.stringify(petFrames)} };</script>`;
-
-  return (
-    '<style id="user-theme-base">' + BASE_CSS + "</style>" +
-    assetsScript
-  );
+/**
+ * 构造要贡献的注入行。
+ * @returns {Array<object>} IndexInjection 行
+ */
+function buildInjections() {
+  const bgUrl = assetUrl("bg.jpg", assetVersion(ASSETS["bg.jpg"]));
+  const pet = {};
+  for (const name of PET_FRAMES) {
+    pet[name] = assetUrl(`pet/${name}.png`, assetVersion(ASSETS[`pet/${name}.png`]));
+  }
+  return [
+    { kind: "style", text: buildThemeCss() },
+    {
+      kind: "global",
+      name: "__USER_THEME_ASSETS__",
+      value: {
+        /** 插件自己的 Host 路由前缀（HTTP 客户端用，桌面端由外壳转发） */
+        routePrefix: PLUGIN_ROUTE_PREFIX,
+        /** 壁纸与桌宠帧的文档相对地址 */
+        bg: bgUrl,
+        pet,
+      },
+    },
+    // 壁纸 preload：让首帧就有图，避免背景闪一下
+    { kind: "html", placement: "head", html: `<link rel="preload" as="image" href="${bgUrl}">` },
+  ];
 }
 
 export function apply(ctx) {
-  const injection = buildCss();
+  // 结构化注入行：桌面外壳与 Web 端 fallback 渲染 index 时都会收集这一批行。
+  ctx.on("webserver/index-inject", (table) => {
+    try {
+      table.push(...buildInjections());
+    } catch (err) {
+      ctx.logger?.warn?.(`[user-theme] 主题注入失败：${err?.message || err}`);
+    }
+  });
 
   ctx.inject(["webServer"], (httpCtx) => {
-    httpCtx.effect(
-      () =>
-        httpCtx.webServer.tapIndex((html) => {
-          if (/<\/head>/i.test(html)) {
-            return html.replace(/<\/head>/i, injection + "</head>");
-          }
-          return injection + html;
-        }),
-      "user-theme: custom css + assets"
-    );
-
+    // 资源路由（壁纸 / 桌宠帧）/ SSE / 余额代理都挂在注入出来的 webServer 上下文上，
+    // 该上下文回收时会自动清掉这些注册。
+    for (const dispose of registerAssetRoutes(httpCtx.webServer)) {
+      httpCtx.on("dispose", () => dispose());
+    }
     setupNotify(httpCtx);
     setupBalance(httpCtx);
   });
